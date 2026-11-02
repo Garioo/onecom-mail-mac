@@ -3,14 +3,14 @@
   <channel>
     <title>one.com Mail</title>
     <item>
-      <title>Version 1.3.1</title>
-      <pubDate>Mon, 02 Nov 2026 10:27:28 +0000</pubDate>
-      <sparkle:version>1793615236</sparkle:version>
-      <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
+      <title>Version 1.4</title>
+      <pubDate>Mon, 02 Nov 2026 10:46:15 +0000</pubDate>
+      <sparkle:version>1793616365</sparkle:version>
+      <sparkle:shortVersionString>1.4</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<p>Test update: small internal cleanup.</p>]]></description>
-      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.3.1/one.com-Mail-1.3.1.zip"
-                 type="application/octet-stream" sparkle:edSignature="S7ZrD7xAFenURLmNqPuHKMW5MDFa6xabYdUTh3xDbgO2pRks1WUgAwYaxRipAPBJ6PX0LTtV2GbUUeUAFs1XDw==" length="2806363" />
+      <description><![CDATA[<p>Drag or paste photos into your messages. Fixes a rare sign-in Keychain error.</p>]]></description>
+      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.4/one.com-Mail-1.4.zip"
+                 type="application/octet-stream" sparkle:edSignature="06Gclbz7cX518XEztN5YeejP8q7aVtyJSJportzkF0eY9D0eMZ424XG6+FbhkPrjVsiLuPXz2vLbClMA7rZ7BA==" length="2839345" />
     </item>
   </channel>
 </rss>
