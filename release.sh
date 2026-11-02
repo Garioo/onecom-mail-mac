@@ -75,3 +75,4 @@ git push --quiet origin HEAD
 
 echo "✓ Released $VERSION: https://github.com/$REPO/releases/tag/v$VERSION"
 echo "  Download page to share: https://github.com/$REPO/releases/latest"
+echo "  Installed apps see it within about 5 minutes (GitHub caches the update feed that long)."
