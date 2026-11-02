@@ -1,0 +1,11 @@
+# Built apps and downloads (made by build.sh / release.sh)
+build/
+dist/
+vendor/
+*.app
+build.log
+.DS_Store
+
+# Private: screenshots of real mail and pre-redesign copies
+.impeccable/review/
+.impeccable/backup/
