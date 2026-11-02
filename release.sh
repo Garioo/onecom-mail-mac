@@ -9,7 +9,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="${1:?usage: bash release.sh <version> \"what's new\"}"
+VERSION="${1:?usage: bash release.sh VERSION NOTES}"
 NOTES="${2:-}"
 REPO="Garioo/onecom-mail-mac"
 APP="one.com Mail.app"
