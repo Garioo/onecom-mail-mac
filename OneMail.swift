@@ -948,8 +948,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             delete.keyEquivalent = ""
             let cancel = alert.addButton(withTitle: "Cancel")
             cancel.keyEquivalent = "\r"
-            alert.beginSheetModal(for: window) { [weak self] response in
-                guard response == .alertFirstButtonReturn, let self = self else { return }
+            alert.beginSheetModal(for: window) { response in
+                guard response == .alertFirstButtonReturn else { return }
                 Task { @MainActor in
                     if let error = await self.mailStore.deleteFolder(folder) {
                         self.showAlert("Couldn't delete “\(folder.name)”.", info: error)
