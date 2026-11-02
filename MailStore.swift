@@ -884,14 +884,16 @@ final class MailStore: ObservableObject {
     }
 
     private func buildMessage(_ draft: ComposeDraft, account: MailAccount, messageID: String, forDraft: Bool) -> [UInt8] {
-        MessageBuilder.build(
+        let body = RichText.html(draft.body)
+        return MessageBuilder.build(
             from: MailAddress(name: account.name, email: account.email),
             to: MailAddress.parseList(draft.to),
             cc: MailAddress.parseList(draft.cc),
             bcc: forDraft ? MailAddress.parseList(draft.bcc) : [],
             subject: draft.subject,
             text: RichText.plainText(draft.body),
-            html: RichText.html(draft.body),
+            html: body.html,
+            inlineImages: body.images,
             attachments: draft.attachments,
             inReplyTo: draft.inReplyTo,
             references: draft.references,

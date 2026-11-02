@@ -1007,6 +1007,7 @@ final class ComposeModel: ObservableObject {
         self.openedFromDraft = draft.existingDraft != nil
         self.showBcc = !draft.bcc.isEmpty
         editor.onChange = { [weak self] in self?.dirty = true }
+        editor.onFiles = { [weak self] urls in self?.addAttachments(urls) }
         startAutosave()
     }
 

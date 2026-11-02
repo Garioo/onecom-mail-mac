@@ -32,7 +32,7 @@ Building from source needs the Xcode Command Line Tools (`xcode-select --install
 - **Text size**: ⌘+ and ⌘− make the list and reader bigger or smaller (⌘0 for standard). On Webmail and Control Panel they zoom the page.
 - **Dark mode**: emails designed on white are darkened to match the app, with photos kept in their real colours. Turn it off under *View → Darken Emails in Dark Mode*.
 - **Privacy**: images from the web are blocked until you click *Load Images*. Scripts in emails never run.
-- **Compose** opens in its own window: To / Cc / Bcc, Subject and a **rich-text** message. Send, Attach and Save Draft are in its toolbar; you can also drop files onto the window. ⌘↩ sends. Sent mail is saved to your Sent folder.
+- **Compose** opens in its own window: To / Cc / Bcc, Subject and a **rich-text** message. Send, Attach and Save Draft are in its toolbar; you can also drop files onto the window. **Photos** dragged or pasted into the message go into the text where you let go and show inside the email for the recipient; very large photos are sent at 2048 pixels. ⌘↩ sends. Sent mail is saved to your Sent folder.
   - Formatting bar: bold, italic, underline, strikethrough, smaller/bigger text, bullets, links, fonts and text colour (also in the *Format* menu: ⌘B, ⌘I, ⌘U, ⌘K, ⌘T, ⇧⌘C)
   - Mail goes out as HTML with a plain-text version alongside, so it reads well everywhere. Quoted text in replies becomes a proper quote block.
 - **Drafts**: ⌘S or *Save Draft* saves to your Drafts folder, and it also autosaves every 30 seconds. The compose window's title bar says when it was last saved. Closing an unsent message asks *Save / Don't Save / Cancel*. Open a draft in the Drafts folder and click **Edit Draft** (⌘E) to carry on; sending it removes the draft.
@@ -70,7 +70,6 @@ Building from source needs the Xcode Command Line Tools (`xcode-select --install
 ## Not yet
 
 - Multiple accounts
-- Pasting images into the message body (attach them instead)
 
 ## Servers
 

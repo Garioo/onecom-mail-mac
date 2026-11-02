@@ -828,6 +828,8 @@ struct OutgoingAttachment: Identifiable {
     var filename: String
     var mimeType: String
     var data: Data
+    /// Set for photos inside the message text (the HTML refers to them as "cid:…").
+    var contentID: String? = nil
 }
 
 enum MessageBuilder {
@@ -839,7 +841,8 @@ enum MessageBuilder {
     /// Builds an RFC 5322 message. With `html`, the body is multipart/alternative (plain text + HTML).
     /// `bcc` is only written into the message for drafts, so it survives reopening.
     static func build(from: MailAddress, to: [MailAddress], cc: [MailAddress], bcc: [MailAddress] = [],
-                      subject: String, text: String, html: String?, attachments: [OutgoingAttachment],
+                      subject: String, text: String, html: String?, inlineImages: [OutgoingAttachment] = [],
+                      attachments: [OutgoingAttachment],
                       inReplyTo: String?, references: [String], messageID: String) -> [UInt8] {
         var headers: [String] = []
         headers.append("From: " + format(from))
@@ -863,6 +866,23 @@ enum MessageBuilder {
                 + "--\(alt)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n"
                 + quotedPrintable(html) + "\r\n"
                 + "--\(alt)--"
+            // Photos in the text travel with the HTML in a multipart/related block.
+            if !inlineImages.isEmpty {
+                let rel = "=_OneMailRel_" + UUID().uuidString
+                var related = "Content-Type: multipart/related; boundary=\"\(rel)\"; type=\"multipart/alternative\"\r\n\r\n"
+                    + "--\(rel)\r\n" + bodyEntity + "\r\n"
+                for image in inlineImages {
+                    related += "--\(rel)\r\n"
+                    related += "Content-Type: \(image.mimeType); name=\(parameterValue(image.filename))\r\n"
+                    related += "Content-ID: <\(image.contentID ?? "")>\r\n"
+                    related += "Content-Disposition: inline; \(filenameParameter(image.filename))\r\n"
+                    related += "Content-Transfer-Encoding: base64\r\n\r\n"
+                    related += image.data.base64EncodedString(options: [.lineLength76Characters, .endLineWithCarriageReturn,
+                                                                        .endLineWithLineFeed])
+                    related += "\r\n"
+                }
+                bodyEntity = related + "--\(rel)--"
+            }
         }
 
         var out = headers.joined(separator: "\r\n") + "\r\n"
