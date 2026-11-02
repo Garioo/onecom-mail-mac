@@ -9,3 +9,9 @@ build.log
 # Private: screenshots of real mail and pre-redesign copies
 .impeccable/review/
 .impeccable/backup/
+
+# Private design notes (kept locally, not published)
+.impeccable/
+DESIGN.md
+PRODUCT.md
+icon-preview.png
