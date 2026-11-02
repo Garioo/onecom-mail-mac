@@ -42,7 +42,8 @@ struct ComposeDraft {
 // MARK: - Keychain
 
 enum Keychain {
-    static let service = "one.com Mail"
+    // The Dev build keeps its own entry: macOS won't let one app replace an entry another app made.
+    static let service = isDevBuild ? "one.com Mail Dev" : "one.com Mail"
 
     static func save(_ password: String, account: String) throws {
         delete(account: account)
@@ -52,7 +53,16 @@ enum Keychain {
             kSecAttrAccount as String: account,
             kSecValueData as String: Data(password.utf8),
         ]
-        let status = SecItemAdd(query as CFDictionary, nil)
+        var status = SecItemAdd(query as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            // An entry we couldn't delete (e.g. made by an older build): change its password instead.
+            let match: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account,
+            ]
+            status = SecItemUpdate(match as CFDictionary, [kSecValueData as String: Data(password.utf8)] as CFDictionary)
+        }
         guard status == errSecSuccess else {
             throw MailError.server("Couldn't save your password to the Keychain (error \(status)).")
         }
