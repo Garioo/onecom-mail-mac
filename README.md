@@ -19,7 +19,7 @@ The app checks for new versions by itself every few hours. When there is one, a 
 
 Building from source needs the Xcode Command Line Tools (`xcode-select --install`).
 
-- `bash build.sh` builds the app from this folder, installs it in Applications and opens it. That copy updates itself whenever the source files here change: an **Install Update** button appears at the bottom of the sidebar.
+- `bash build.sh` builds **one.com Mail Dev** from this folder (amber DEV icon, its own settings, notifications off at first), installs it in Applications next to one.com Mail and opens it. It updates itself whenever the source files here change, committed or not: an **Install Update** button appears at the bottom of the sidebar. It never checks GitHub and is never released.
 - `bash release.sh 1.3 "What's new"` publishes a version on GitHub for everyone else. Commit your changes first. It builds for Intel and Apple silicon, makes the .dmg and the update file, signs the update and updates `appcast.xml`, the feed the app checks.
 - Updates are signed with a private key kept in this Mac's Keychain (made once with `vendor/Sparkle/bin/generate_keys`). Back it up with `vendor/Sparkle/bin/generate_keys -x sparkle-key.txt` and keep that file somewhere safe and private: without the key, no further updates can be published.
 
@@ -87,4 +87,5 @@ The defaults are one.com's: IMAP `imap.one.com:993` and SMTP `send.one.com:465`,
 - `MailMIME.swift` — email parsing (MIME, encodings, attachments) and building outgoing mail
 - `AppIcon.swift` — draws the icon at build time
 - `build.sh` — compiles, makes the icon, bundles Sparkle and signs the .app
+- `DevBadge.swift` — adds the DEV band to the developer build's icon
 - `release.sh` — publishes a version on GitHub (.dmg, signed update, `appcast.xml`)

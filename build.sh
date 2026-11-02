@@ -16,10 +16,15 @@ SRC="$(pwd)"
 exec > >(tee "$SRC/build.log") 2>&1
 echo "Build started $(date)"
 
-APP="one.com Mail.app"
-EXE="OneMail"
-BUNDLE_ID="local.personal.onecom-mail"
 MODE="${1:-install}"
+EXE="OneMail"
+# Builds from this folder are a separate app, "one.com Mail Dev", so it can sit next to the
+# downloaded one.com Mail without the two mixing up settings, windows or updates.
+if [ "$MODE" = "--release" ]; then
+  APP="one.com Mail.app"; NAME="one.com Mail"; BUNDLE_ID="local.personal.onecom-mail"; ICON_ARGS=""
+else
+  APP="one.com Mail Dev.app"; NAME="one.com Mail Dev"; BUNDLE_ID="local.personal.onecom-mail.dev"; ICON_ARGS="dev"
+fi
 # Releases run on Intel and Apple silicon Macs; everyday builds only for this Mac.
 if [ "$MODE" = "--release" ]; then ARCHS="arm64 x86_64"; else ARCHS="$(uname -m)"; fi
 VERSION="1.2"
@@ -74,6 +79,10 @@ ditto "$SPARKLE/Sparkle.framework" "$STAGE/Contents/Frameworks/Sparkle.framework
 echo "→ Drawing icon…"
 swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos12.0" AppIcon.swift -o build/makeicon
 build/makeicon build/icon_1024.png
+if [ -n "$ICON_ARGS" ]; then
+  swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos12.0" DevBadge.swift -o build/devbadge
+  build/devbadge build/icon_1024.png
+fi
 ICONSET="build/AppIcon.iconset"
 mkdir -p "$ICONSET"
 for s in 16 32 128 256 512; do
@@ -101,8 +110,8 @@ cat > "$STAGE/Contents/Info.plist" <<PLIST
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>one.com Mail</string>
-  <key>CFBundleDisplayName</key><string>one.com Mail</string>
+  <key>CFBundleName</key><string>$NAME</string>
+  <key>CFBundleDisplayName</key><string>$NAME</string>
   <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
   <key>CFBundleExecutable</key><string>$EXE</string>
   <key>CFBundleIconFile</key><string>AppIcon</string>

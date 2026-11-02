@@ -13,7 +13,9 @@ import UniformTypeIdentifiers
 
 let webmailURL = URL(string: "https://mail.one.com/")!
 let controlPanelURL = URL(string: "https://login.one.com/")!
-let appName = "one.com Mail"
+let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "one.com Mail"
+/// The build made from the source folder ("one.com Mail Dev"), as opposed to the downloaded app.
+let isDevBuild = Bundle.main.bundleIdentifier?.hasSuffix(".dev") ?? false
 
 /// Pages on one.com (and its subdomains) stay inside the app; everything else opens in your browser.
 func isOneCom(_ url: URL) -> Bool {
@@ -369,7 +371,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     let notificationHandler = NotificationHandler()
 
     var notificationsEnabled: Bool {
-        get { UserDefaults.standard.object(forKey: "notifyNewMail") as? Bool ?? true }
+        // The dev build starts quiet, so running both copies doesn't notify you twice.
+        get { UserDefaults.standard.object(forKey: "notifyNewMail") as? Bool ?? !isDevBuild }
         set { UserDefaults.standard.set(newValue, forKey: "notifyNewMail") }
     }
 
