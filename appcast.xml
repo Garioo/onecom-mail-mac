@@ -3,14 +3,14 @@
   <channel>
     <title>one.com Mail</title>
     <item>
-      <title>Version 1.3</title>
-      <pubDate>Mon, 02 Nov 2026 10:23:02 +0000</pubDate>
-      <sparkle:version>1793614968</sparkle:version>
-      <sparkle:shortVersionString>1.3</sparkle:shortVersionString>
+      <title>Version 1.3.1</title>
+      <pubDate>Mon, 02 Nov 2026 10:27:28 +0000</pubDate>
+      <sparkle:version>1793615236</sparkle:version>
+      <sparkle:shortVersionString>1.3.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<p>First version: native Mac look, folders, drag and drop to folders.</p>]]></description>
-      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.3/one.com-Mail-1.3.zip"
-                 type="application/octet-stream" sparkle:edSignature="c4px0PqIGDwS9M+UcBzOqhPPaCfWodw+/0hqfU51eOjOpz17M7kpu3rAfjn/GBxYlmG9lrFHcLfwQEMsazqADw==" length="2806207" />
+      <description><![CDATA[<p>Test update: small internal cleanup.</p>]]></description>
+      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.3.1/one.com-Mail-1.3.1.zip"
+                 type="application/octet-stream" sparkle:edSignature="S7ZrD7xAFenURLmNqPuHKMW5MDFa6xabYdUTh3xDbgO2pRks1WUgAwYaxRipAPBJ6PX0LTtV2GbUUeUAFs1XDw==" length="2806363" />
     </item>
   </channel>
 </rss>
