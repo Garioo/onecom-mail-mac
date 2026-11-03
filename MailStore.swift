@@ -152,6 +152,12 @@ final class MailStore: ObservableObject {
     private var cache: [String: ParsedMessage] = [:]
 
     private static let accountKey = "mailAccount"
+    private static let blockedKey = "blockedSenders"
+
+    /// Senders whose new mail goes straight to Trash: lowercased addresses, or "@domain" for a whole domain.
+    @Published private(set) var blockedSenders = Set(UserDefaults.standard.stringArray(forKey: blockedKey) ?? []) {
+        didSet { UserDefaults.standard.set(blockedSenders.sorted(), forKey: Self.blockedKey) }
+    }
 
     init() {
         guard let data = UserDefaults.standard.data(forKey: Self.accountKey),
@@ -401,7 +407,8 @@ final class MailStore: ObservableObject {
         do {
             let page = try await client.fetchPage(folder: folder.path, upTo: nil, count: pageSize)
             guard token == folderToken else { return }
-            let newest = page.messages
+            let newest = folder.role == .inbox ? await dropBlocked(page.messages) : page.messages
+            guard token == folderToken else { return }
             let cutoff = newest.map { $0.uid }.min() ?? 0
             let older = messages.filter { $0.uid < cutoff }
             messages = (newest + older).sorted { $0.uid > $1.uid }
@@ -758,6 +765,52 @@ final class MailStore: ObservableObject {
         }
     }
 
+    // MARK: Blocked senders
+
+    /// The block-list entry that catches this sender: their address, or "@their-domain".
+    func blockEntry(for sender: MailAddress?) -> String? {
+        guard let email = sender?.email.lowercased() else { return nil }
+        if blockedSenders.contains(email) { return email }
+        let domain = email.split(separator: "@").last.map { "@" + $0 }
+        return domain.flatMap { blockedSenders.contains($0) ? $0 : nil }
+    }
+
+    func isBlocked(_ sender: MailAddress?) -> Bool { blockEntry(for: sender) != nil }
+
+    /// Turns what someone typed ("name@example.com", "@example.com" or "example.com") into a block-list entry.
+    static func blockEntry(typed raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !s.contains(" "), s.contains(".") else { return nil }
+        if s.contains("@") { return s.hasSuffix("@") ? nil : s }
+        return "@" + s
+    }
+
+    /// Blocks an address or "@domain" and moves loaded mail it catches to Trash; new mail is trashed on arrival.
+    func block(_ entry: String) {
+        blockedSenders.insert(entry)
+        let caught = messages.filter { $0.folder != trashFolder?.path && isBlocked($0.from) }
+        guard !caught.isEmpty else { return }
+        removeMany(Set(caught.map { $0.id }))
+        Task { _ = await dropBlocked(caught) }
+    }
+
+    func unblock(_ entry: String) {
+        blockedSenders.remove(entry)
+    }
+
+    /// Moves mail from blocked senders to Trash on the server and returns the rest.
+    private func dropBlocked(_ list: [MessageSummary]) async -> [MessageSummary] {
+        guard let client = client, let trash = trashFolder else { return list }
+        let blocked = list.filter { $0.folder != trash.path && isBlocked($0.from) }
+        guard !blocked.isEmpty else { return list }
+        for (folder, uids) in byFolder(blocked) {
+            try? await client.move(folder: folder, uids: uids, to: trash.path)
+        }
+        await refreshUnread()
+        let ids = Set(blocked.map { $0.id })
+        return list.filter { !ids.contains($0.id) }
+    }
+
     // MARK: Clean Up
 
     /// Opens Clean Up for the current folder, optionally with one sender already ticked.
@@ -802,7 +855,15 @@ final class MailStore: ObservableObject {
 
     func newMessage() {
         guard account != nil else { return }
-        onCompose?(ComposeDraft())
+        var draft = ComposeDraft()
+        draft.body = RichText.plain(signatureBlock)
+        onCompose?(draft)
+    }
+
+    /// The signature from Settings, set off by the standard "-- " line; empty when there's none.
+    private var signatureBlock: String {
+        let sig = (UserDefaults.standard.string(forKey: "signature") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return sig.isEmpty ? "" : "\n\n-- \n" + sig
     }
 
     func reply(all: Bool) {
@@ -827,7 +888,7 @@ final class MailStore: ObservableObject {
         draft.cc = cc.map { $0.editable }.joined(separator: ", ")
         draft.subject = s.subject.lowercased().hasPrefix("re:") ? s.subject : "Re: " + s.subject
         let who = s.from?.display ?? "someone"
-        let body = NSMutableAttributedString(attributedString: RichText.plain("\n\nOn \(MailDate.longString(s.date)), \(who) wrote:\n"))
+        let body = NSMutableAttributedString(attributedString: RichText.plain(signatureBlock + "\n\nOn \(MailDate.longString(s.date)), \(who) wrote:\n"))
         body.append(RichText.quoted(o.parsed.plainText))
         draft.body = body
         draft.inReplyTo = s.messageID
@@ -841,7 +902,7 @@ final class MailStore: ObservableObject {
         let s = o.summary
         var draft = ComposeDraft()
         draft.subject = s.subject.lowercased().hasPrefix("fwd:") ? s.subject : "Fwd: " + s.subject
-        var header = "\n\n---------- Forwarded message ----------\n"
+        var header = signatureBlock + "\n\n---------- Forwarded message ----------\n"
         if let from = s.from { header += "From: \(from.editable)\n" }
         header += "Date: \(MailDate.longString(s.date))\n"
         header += "Subject: \(s.subject)\n"
@@ -980,14 +1041,67 @@ final class MailStore: ObservableObject {
             let status = try await client.status(folder: inbox.path)
             setUnread(status.unseen)
             if let previous = inboxUIDNext, status.uidNext > previous {
-                let fresh = try await client.fetchNewMessages(folder: inbox.path, fromUID: previous)
+                let fresh = await dropBlocked(try await client.fetchNewMessages(folder: inbox.path, fromUID: previous))
                 if notify && !fresh.isEmpty { onNewMail?(fresh) }
+                await autoReply(to: fresh)
                 if currentFolder?.path == inbox.path { await loadTop(token: folderToken, showSpinner: false) }
             }
             inboxUIDNext = status.uidNext
         } catch {
             // Stay quiet; the next check will try again.
         }
+    }
+
+    // MARK: Auto-reply
+
+    /// When each sender last got an auto-reply, so nobody gets more than one a week.
+    private var autoReplied: [String: Date] {
+        get { UserDefaults.standard.dictionary(forKey: "autoReplied") as? [String: Date] ?? [:] }
+        set { UserDefaults.standard.set(newValue, forKey: "autoReplied") }
+    }
+
+    /// Answers new mail with the auto-reply from Settings while it's on. Runs from this Mac, so only
+    /// while the app is open. Skips newsletters, mailing lists, no-reply addresses and yourself.
+    private func autoReply(to fresh: [MessageSummary]) async {
+        let d = UserDefaults.standard
+        let text = (d.string(forKey: "autoReplyText") ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard d.bool(forKey: "autoReplyOn"), !text.isEmpty, let account = account else { return }
+        let until = d.double(forKey: "autoReplyUntil")   // 0 = no end date
+        if until > 0, Calendar.current.startOfDay(for: Date()) > Date(timeIntervalSince1970: until) {
+            d.set(false, forKey: "autoReplyOn")
+            return
+        }
+        let me = account.email.lowercased()
+        let robots = ["noreply", "no-reply", "donotreply", "do-not-reply", "mailer-daemon", "postmaster", "bounce"]
+        let weekAgo = Date().addingTimeInterval(-7 * 86400)
+        var replied = autoReplied.filter { $0.value > weekAgo }
+        for m in fresh where !m.isAutomated {
+            guard let to = m.replyTo.first ?? m.from else { continue }
+            let key = to.email.lowercased()
+            let local = String(key.split(separator: "@").first ?? "")
+            guard key != me, replied[key] == nil, !robots.contains(where: local.contains) else { continue }
+
+            var draft = ComposeDraft()
+            draft.to = to.editable
+            draft.subject = m.subject.lowercased().hasPrefix("re:") ? m.subject : "Re: " + m.subject
+            draft.body = RichText.plain(text)
+            draft.inReplyTo = m.messageID
+            draft.references = m.references + (m.messageID.map { [$0] } ?? [])
+            let id = MessageBuilder.newMessageID(for: account.email)
+            // Marks it as automatic (RFC 3834) so the other side's auto-reply doesn't answer back.
+            let message = Array("Auto-Submitted: auto-replied\r\n".utf8)
+                + buildMessage(draft, account: account, messageID: id, forDraft: false)
+            do {
+                try await SMTPSender.send(account: account, password: password, recipients: [to.email], message: message)
+                replied[key] = Date()
+                if let client = client, let sent = sentFolder {
+                    try? await client.append(folder: sent.path, message: message, flags: "\\Seen")
+                }
+            } catch {
+                // Try again with the next new mail from them.
+            }
+        }
+        autoReplied = replied
     }
 
     private func refreshUnread() async {

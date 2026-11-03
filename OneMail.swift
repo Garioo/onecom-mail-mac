@@ -635,6 +635,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             UNNotificationRequest(identifier: UUID().uuidString, content: note, trigger: nil))
     }
 
+    // MARK: Settings window
+
+    private var settingsWindow: NSWindow?
+
+    @objc func openSettings(_ sender: Any?) {
+        if settingsWindow == nil {
+            let view = SettingsView(
+                store: mailStore,
+                notify: Binding(get: { self.notificationsEnabled }, set: { self.notificationsEnabled = $0 }),
+                launchAtLogin: Binding(get: { self.launchesAtLogin }, set: { _ in self.toggleLaunchAtLogin(nil) }))
+            let w = NSWindow(contentViewController: NSHostingController(rootView: view))
+            w.title = "Settings"
+            w.styleMask = [.titled, .closable]
+            w.isReleasedWhenClosed = false
+            w.center()
+            settingsWindow = w
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    var launchesAtLogin: Bool {
+        guard #available(macOS 13.0, *) else { return false }
+        return SMAppService.mainApp.status == .enabled
+    }
+
     // MARK: Compose windows
 
     func openCompose(_ draft: ComposeDraft) {
@@ -1238,7 +1264,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     /// Closing a compose window with unsaved changes asks whether to keep it as a draft.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard let model = composeModels[ObjectIdentifier(sender)], model.needsSavePrompt else { return true }
+        guard let model = composeModels[ObjectIdentifier(sender)] else { return true }
+        // Stays open while sending (and while it can be undone), so a failure is never lost.
+        if model.isSending {
+            NSSound.beep()
+            return false
+        }
+        guard model.needsSavePrompt else { return true }
         let alert = NSAlert()
         alert.messageText = "Do you want to save this message as a draft?"
         alert.informativeText = "It will be saved to your Drafts folder so you can finish it later."
@@ -1422,6 +1454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         _ = submenu(appName) { m in
             add(m, "About \(appName)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "")
             m.addItem(.separator())
+            add(m, "Settings…", #selector(AppDelegate.openSettings(_:)), ",")
             add(m, "Notify on New Mail", #selector(AppDelegate.toggleNotifications(_:)), "")
             add(m, "Launch at Login", #selector(AppDelegate.toggleLaunchAtLogin(_:)), "")
             m.addItem(.separator())

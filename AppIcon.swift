@@ -1,4 +1,4 @@
-// Draws the app icon (an open envelope with a letter and a coral new-mail dot on an indigo tile)
+// Draws the app icon (an open envelope with a letter and a coral new-mail dot on a one.com-green tile)
 // to a 1024×1024 PNG.
 import AppKit
 
@@ -32,10 +32,10 @@ NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
 
 // Tile (inset like standard macOS icons), lighter at the top
 let tile = rounded(100, 100, 824, 824, 185)
-NSGradient(starting: rgb(0x5B6CFF), ending: rgb(0x262B86))!.draw(in: tile, angle: -90)
+NSGradient(starting: rgb(0x8CD13C), ending: rgb(0x3E8A12))!.draw(in: tile, angle: -90)
 
-let envBack = rgb(0xC9CEFF)
-let envFront = rgb(0xEEF0FF)
+let envBack = rgb(0xD3EDB8)
+let envFront = rgb(0xF2FAEA)
 
 // Envelope back with the open flap
 envBack.setFill()
@@ -46,7 +46,7 @@ polygon([NSPoint(x: 262, y: 596), NSPoint(x: 512, y: 770), NSPoint(x: 762, y: 59
 // Letter sticking out
 NSColor.white.setFill()
 rounded(332, 400, 360, 320, 28).fill()
-rgb(0xB8BFF5).setFill()
+rgb(0xBFE09C).setFill()
 for (i, right) in [620, 600, 560].enumerated() {
     let top = CGFloat(650 - i * 58)
     rounded(392, top - 22, CGFloat(right) - 392, 22, 11).fill()

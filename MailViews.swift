@@ -5,6 +5,153 @@ import AppKit
 import WebKit
 import UniformTypeIdentifiers
 
+// MARK: - Settings
+
+/// The Settings window (⌘,).
+struct SettingsView: View {
+    @ObservedObject var store: MailStore
+    /// Settings that live in the app delegate (notifications, Launch at Login).
+    let notify: Binding<Bool>
+    let launchAtLogin: Binding<Bool>
+
+    var body: some View {
+        TabView {
+            GeneralSettings(notify: notify, launchAtLogin: launchAtLogin)
+                .tabItem { Label("General", systemImage: "gearshape") }
+            SignatureSettings()
+                .tabItem { Label("Signature", systemImage: "signature") }
+            AutoReplySettings()
+                .tabItem { Label("Auto-Reply", systemImage: "arrowshape.turn.up.left") }
+            BlockedSendersSettings(store: store)
+                .tabItem { Label("Blocked", systemImage: "hand.raised") }
+        }
+        .padding(20)
+        .frame(width: 480, height: 400)
+    }
+}
+
+struct GeneralSettings: View {
+    let notify: Binding<Bool>
+    let launchAtLogin: Binding<Bool>
+    @AppStorage("undoSendSeconds") private var undoSeconds = 5
+    /// Bumped after a change so the toggles re-read the real state (Launch at Login can fail).
+    @State private var tick = 0
+
+    private func refreshing(_ b: Binding<Bool>) -> Binding<Bool> {
+        Binding(get: { b.wrappedValue }, set: { b.wrappedValue = $0; tick += 1 })
+    }
+
+    var body: some View {
+        Form {
+            Toggle("Notify on new mail", isOn: refreshing(notify))
+            Toggle("Launch at login", isOn: refreshing(launchAtLogin))
+            Picker("Undo send:", selection: $undoSeconds) {
+                Text("Off").tag(0)
+                Text("5 seconds").tag(5)
+                Text("10 seconds").tag(10)
+                Text("20 seconds").tag(20)
+            }
+            .fixedSize()
+        }
+        .id(tick)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(10)
+    }
+}
+
+/// The app's own auto-reply (MailStore.autoReply), e.g. for holidays.
+struct AutoReplySettings: View {
+    @AppStorage("autoReplyOn") private var isOn = false
+    @AppStorage("autoReplyText") private var text = ""
+    @AppStorage("autoReplyUntil") private var until: Double = 0   // 0 = no end date
+
+    private var hasEnd: Binding<Bool> {
+        Binding(get: { until > 0 },
+                set: { until = $0 ? Date().addingTimeInterval(7 * 86400).timeIntervalSince1970 : 0 })
+    }
+    private var endDate: Binding<Date> {
+        Binding(get: { Date(timeIntervalSince1970: until) }, set: { until = $0.timeIntervalSince1970 })
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Send an auto-reply to new mail", isOn: $isOn)
+            HStack {
+                Toggle("Turn off after", isOn: hasEnd)
+                if until > 0 {
+                    DatePicker("", selection: endDate, displayedComponents: .date).labelsHidden().fixedSize()
+                }
+            }
+            TextEditor(text: $text)
+                .font(.system(size: 13))
+                .border(Color.secondary.opacity(0.3))
+            Text("Sent from this Mac, so only while the app is open and the Mac is awake. Each sender gets at most one a week; newsletters and no-reply addresses are skipped.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(10)
+    }
+}
+
+struct SignatureSettings: View {
+    @AppStorage("signature") private var signature = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Added at the end of new messages, replies and forwards.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+            TextEditor(text: $signature)
+                .font(.system(size: 13))
+                .border(Color.secondary.opacity(0.3))
+        }
+        .padding(10)
+    }
+}
+
+/// Senders whose mail goes straight to Trash.
+struct BlockedSendersSettings: View {
+    @ObservedObject var store: MailStore
+    @State private var typed = ""
+    @State private var picked: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Mail from these addresses or domains is moved to Trash when it arrives. The list is kept on this Mac.")
+                .font(.callout)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            List(store.blockedSenders.sorted(), id: \.self, selection: $picked) { Text($0) }
+                .overlay {
+                    if store.blockedSenders.isEmpty {
+                        Text("No blocked senders. Right-click a message to block its sender.")
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.center)
+                            .padding()
+                    }
+                }
+            HStack {
+                TextField("name@example.com or example.com", text: $typed).onSubmit(add)
+                Button("Block", action: add).disabled(MailStore.blockEntry(typed: typed) == nil)
+                Spacer()
+                Button("Unblock") {
+                    if let p = picked { store.unblock(p) }
+                    picked = nil
+                }
+                .disabled(picked == nil)
+            }
+        }
+        .padding(10)
+    }
+
+    private func add() {
+        guard let entry = MailStore.blockEntry(typed: typed) else { return }
+        store.block(entry)
+        typed = ""
+    }
+}
+
 // MARK: - Root
 
 struct MailRootView: View {
@@ -259,6 +406,17 @@ struct MessageListView: View {
                         .map { $0.id })
                 }
                 Button("Clean Up Mail from \(sender.display)…") { store.openCleanup(sender: sender) }
+                if let entry = store.blockEntry(for: sender) {
+                    Button("Unblock \(entry)") { store.unblock(entry) }
+                } else {
+                    let email = sender.email.lowercased()
+                    let domain = email.split(separator: "@").last.map { "@" + $0 } ?? ""
+                    Button("Block \(email)") { store.block(email) }
+                    // Not your own domain: that would trash mail from yourself and your colleagues.
+                    if !domain.isEmpty, store.account?.email.lowercased().hasSuffix(domain) == false {
+                        Button("Block Everyone \(domain)") { store.block(domain) }
+                    }
+                }
             }
             Divider()
             Button("Delete") { store.delete(message.id) }
@@ -980,6 +1138,8 @@ final class ComposeModel: ObservableObject {
         didSet { dirty = true }
     }
     @Published var isSending = false
+    /// Seconds left before a sent message really goes out, while it can still be undone.
+    @Published private(set) var undoCountdown: Int?
     @Published var isSavingDraft = false
     @Published var error: String?
     @Published var showBcc: Bool
@@ -997,6 +1157,7 @@ final class ComposeModel: ObservableObject {
     private let openedFromDraft: Bool
     private var savedThisSession = false
     private var autosaveTask: Task<Void, Never>?
+    private var sendTask: Task<Void, Never>?
 
     init(draft: ComposeDraft, store: MailStore) {
         self.draft = draft
@@ -1036,7 +1197,14 @@ final class ComposeModel: ObservableObject {
         let id = messageID
         let replacing = replacingDraft
         let hadDraft = savedThisSession || openedFromDraft
-        Task {
+        let delay = UserDefaults.standard.object(forKey: "undoSendSeconds") as? Int ?? 5
+        sendTask = Task {
+            for left in stride(from: delay, to: 0, by: -1) {
+                undoCountdown = left
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                if Task.isCancelled { return }
+            }
+            undoCountdown = nil
             do {
                 try await store.send(current, messageID: id)
                 if hadDraft { await store.discardDraft(messageID: id, replacing: replacing) }
@@ -1047,6 +1215,13 @@ final class ComposeModel: ObservableObject {
                 isSending = false
             }
         }
+    }
+
+    func undoSend() {
+        sendTask?.cancel()
+        sendTask = nil
+        undoCountdown = nil
+        isSending = false
     }
 
     @discardableResult
@@ -1148,6 +1323,18 @@ struct ComposeView: View {
         VStack(spacing: 0) {
             if let error = model.error {
                 ErrorBanner(text: error) { model.error = nil }
+            }
+            if let left = model.undoCountdown {
+                HStack(spacing: 8) {
+                    Image(systemName: "paperplane.fill").foregroundColor(.accentColor)
+                    Text("Sending in \(left) s…").font(.system(size: 12))
+                    Spacer()
+                    Button("Undo") { model.undoSend() }
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                .background(Color.accentColor.opacity(0.1))
             }
             ComposeField(label: "To:", text: $model.draft.to)
             ComposeField(label: "Cc:", text: $model.draft.cc, trailing: model.showBcc ? nil : AnyView(

@@ -127,6 +127,8 @@ struct MessageSummary: Identifiable, Equatable {
     var hasAttachments: Bool
     var messageID: String?
     var references: [String]
+    /// Newsletters, mailing lists and other robots: never auto-replied to.
+    var isAutomated = false
 
     /// Unique across folders (UIDs are only unique within one folder).
     var id: String { folder + "\u{1}" + String(uid) }

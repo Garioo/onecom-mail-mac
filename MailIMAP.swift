@@ -307,7 +307,7 @@ actor IMAPClient {
         case literal([UInt8])
     }
 
-    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE CONTENT-TRANSFER-ENCODING)] BODY.PEEK[TEXT]<0.3000>)"
+    static let summaryItems = "(UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM TO CC REPLY-TO SUBJECT DATE MESSAGE-ID REFERENCES IN-REPLY-TO CONTENT-TYPE CONTENT-TRANSFER-ENCODING LIST-ID LIST-UNSUBSCRIBE PRECEDENCE AUTO-SUBMITTED)] BODY.PEEK[TEXT]<0.3000>)"
 
     let account: MailAccount
     private let password: String
@@ -894,7 +894,10 @@ actor IMAPClient {
             answered: flags.contains("\\answered"),
             hasAttachments: contentType == "multipart/mixed",
             messageID: h["message-id"]?.trimmingCharacters(in: .whitespaces),
-            references: refs)
+            references: refs,
+            isAutomated: h["list-id"] != nil || h["list-unsubscribe"] != nil
+                || ["bulk", "list", "junk"].contains(h["precedence"]?.trimmingCharacters(in: .whitespaces).lowercased() ?? "")
+                || (h["auto-submitted"].map { $0.trimmingCharacters(in: .whitespaces).lowercased() != "no" } ?? false))
     }
 
     static func makeFolder(path: String, delimiter: String, flags: Set<String>) -> MailFolder {
