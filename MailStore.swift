@@ -153,7 +153,9 @@ final class MailStore: ObservableObject {
     @Published var snoozePicker: SnoozeRequest?
     /// Shows a notification (title, body): sent-later mail, follow-up reminders.
     var onReminder: ((String, String) -> Void)?
-    var lastRulesRun = Date.distantPast
+    /// Starts as if rules ran just under 6 hours ago: the first run comes a few minutes after launch,
+    /// not while the Inbox is first loading.
+    var lastRulesRun = Date().addingTimeInterval(-6 * 3600 + 5 * 60)
 
     /// Clean Up sheet, when open.
     @Published var cleanup: CleanupModel?
@@ -556,7 +558,6 @@ final class MailStore: ObservableObject {
     // MARK: Reading
 
     private func openSelected() {
-        if let id = selectedID { markSeen(thread(of: id)) }
         show(selectedID)
     }
 
@@ -572,7 +573,7 @@ final class MailStore: ObservableObject {
         }
         if let parsed = cache[id] {
             opened = OpenedMessage(summary: summary, parsed: parsed)
-            markSeen([summary])
+            markSeen(readTogether(id))
             return
         }
         opened = nil
@@ -588,11 +589,17 @@ final class MailStore: ObservableObject {
                 guard showingID == id else { return }
                 let latest = message(id: id) ?? summary
                 opened = OpenedMessage(summary: latest, parsed: parsed)
-                markSeen([latest])
+                // Only now: the server handles one command at a time, so flags sent first would hold up the fetch.
+                markSeen(readTogether(id))
             } catch {
                 if showingID == id { errorMessage = error.localizedDescription }
             }
         }
+    }
+
+    /// What opening a message marks as read: the whole conversation when it's the selected row.
+    private func readTogether(_ id: String) -> [MessageSummary] {
+        id == selectedID ? thread(of: id) : message(id: id).map { [$0] } ?? []
     }
 
     private func markSeen(_ list: [MessageSummary]) {
@@ -600,11 +607,12 @@ final class MailStore: ObservableObject {
         guard !unseen.isEmpty, let client = client else { return }
         for m in unseen { update(m.id) { $0.seen = true } }
         let groups = byFolder(unseen)
+        let touchesInbox = groups.keys.contains { $0 == inboxFolder?.path }
         Task {
             for (folder, uids) in groups {
                 try? await client.setFlag(folder: folder, uids: uids, flag: "\\Seen", on: true)
             }
-            await refreshUnread()
+            if touchesInbox { await refreshUnread() }
         }
     }
 

@@ -789,7 +789,6 @@ struct ReaderView: View {
                 BulkSelectionView(store: store)
             } else if let opened = store.opened {
                 MessageDetailView(store: store, opened: opened)
-                    .id(opened.summary.id)
             } else if store.isLoadingMessage {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -971,6 +970,7 @@ struct MessageDetailView: View {
 
                 if let unsubscribe = unsubscribe, s.from?.email.lowercased() != store.account?.email.lowercased() {
                     UnsubscribeNotice(store: store, unsubscribe: unsubscribe, sender: s.from, textSize: textSize)
+                        .id(s.id)
                 }
 
                 if conversation.count > 1 {
@@ -1268,6 +1268,10 @@ struct MessageBodyView: NSViewRepresentable {
             }
         }
 
+        // Shown once the email's own HTML is in (styles included), not after every web image has loaded.
+        func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.reveal(webView) }
+        }
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { reveal(webView) }
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { reveal(webView) }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
