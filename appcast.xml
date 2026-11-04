@@ -3,14 +3,14 @@
   <channel>
     <title>one.com Mail</title>
     <item>
-      <title>Version 1.5</title>
-      <pubDate>Tue, 03 Nov 2026 13:59:44 +0000</pubDate>
-      <sparkle:version>1793714371</sparkle:version>
-      <sparkle:shortVersionString>1.5</sparkle:shortVersionString>
+      <title>Version 1.6</title>
+      <pubDate>Wed, 04 Nov 2026 11:35:03 +0000</pubDate>
+      <sparkle:version>1793792090</sparkle:version>
+      <sparkle:shortVersionString>1.6</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<p>New Settings window (⌘,): block senders or whole domains, a signature, undo send, and an auto-reply for holidays. New green app icon.</p>]]></description>
-      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.5/one.com-Mail-1.5.zip"
-                 type="application/octet-stream" sparkle:edSignature="ftPaJhdmFop70J2kOGSoZpTggeb00+AznJpD+iNEI76tCYGYactAipdRjNwjGs0capBTzeGYqYCFKBfXIYwGAA==" length="2946498" />
+      <description><![CDATA[<p>Conversations, Undo (⌘Z), one-click Unsubscribe, Remind Me (snooze), Send Later, follow-up reminders, standing Clean Up rules, an attachment browser with Quick Look, an Inbox filter (People / Newsletters / Receipts), copyable sign-in codes, and Show as Designed for emails that look wrong in dark mode.</p>]]></description>
+      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.6/one.com-Mail-1.6.zip"
+                 type="application/octet-stream" sparkle:edSignature="SKk2E7/xSe7hdbRWjK91Ma5Cm80favk66KzGwGRVQD5G9XzCR2EgaiWIKcKWm8gllE1xwa0KNoEBQAlSVvNsBA==" length="3555641" />
     </item>
   </channel>
 </rss>
