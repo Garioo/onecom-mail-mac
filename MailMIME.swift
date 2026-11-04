@@ -142,6 +142,181 @@ struct CleanupItem {
     var size: Int
     var seen: Bool
     var isNewsletter: Bool
+    var unsubscribe: Unsubscribe?
+}
+
+/// An attachment found in a message's BODYSTRUCTURE, for the attachment browser.
+struct AttachmentInfo: Identifiable {
+    var folder: String
+    var uid: UInt32
+    var part: String
+    var filename: String
+    var mimeType: String
+    var encoding: String
+    /// Encoded size from the server; roughly the file size (base64 adds a third).
+    var size: Int
+    var from: MailAddress?
+    var subject: String
+    var date: Date
+
+    var id: String { folder + "\u{1}" + String(uid) + "." + part }
+    var messageID: String { folder + "\u{1}" + String(uid) }
+    var fileSize: Int { encoding == "base64" ? size * 3 / 4 : size }
+    var isImage: Bool { mimeType.hasPrefix("image/") }
+    var isPDF: Bool { mimeType == "application/pdf" || filename.lowercased().hasSuffix(".pdf") }
+
+    /// The named parts of a BODYSTRUCTURE, with their IMAP part numbers. Small unnamed or inline
+    /// pictures (logos, tracking pixels) are left out.
+    static func parts(of structure: [IMAPValue]) -> [(part: String, filename: String, mimeType: String, encoding: String, size: Int)] {
+        var out: [(part: String, filename: String, mimeType: String, encoding: String, size: Int)] = []
+        func pairs(_ v: IMAPValue?) -> [String: String] {
+            var d: [String: String] = [:]
+            let l = v?.list ?? []
+            var i = 0
+            while i + 1 < l.count {
+                if let k = l[i].text?.lowercased() { d[k] = l[i + 1].text ?? "" }
+                i += 2
+            }
+            return d
+        }
+        func walk(_ v: [IMAPValue], _ number: String) {
+            if v.first?.list != nil {   // multipart: children, then the subtype
+                var i = 0
+                for child in v {
+                    guard let l = child.list else { break }
+                    i += 1
+                    walk(l, number.isEmpty ? "\(i)" : "\(number).\(i)")
+                }
+                return
+            }
+            guard v.count >= 7 else { return }
+            let type = (v[0].text ?? "").lowercased()
+            let subtype = (v[1].text ?? "").lowercased()
+            let params = pairs(v[2])
+            // Extension data starts after the basic fields: text adds a line count,
+            // message/rfc822 adds an envelope, a body and a line count. Disposition follows MD5.
+            let ext = type == "text" ? 8 : (type == "message" && subtype == "rfc822") ? 10 : 7
+            let disposition = v.count > ext + 1 ? v[ext + 1].list : nil
+            let kind = (disposition?.first?.text ?? "").lowercased()
+            let dparams = pairs(disposition.flatMap { $0.count > 1 ? $0[1] : nil })
+            let raw = dparams["filename"] ?? dparams["filename*"].map(MIME.decodeRFC2231)
+                ?? params["name"] ?? params["name*"].map(MIME.decodeRFC2231)
+            guard let name = raw.map(MIME.decodeHeader), !name.isEmpty else { return }
+            let size = v[6].int ?? 0
+            if kind != "attachment" && (type == "text" || (type == "image" && size < 20_000)) { return }
+            out.append((part: number.isEmpty ? "1" : number, filename: name, mimeType: "\(type)/\(subtype)",
+                        encoding: (v[5].text ?? "").lowercased(), size: size))
+        }
+        walk(structure, "")
+        return out
+    }
+}
+
+/// Small judgements about mail the app makes on its own.
+enum SmartMail {
+    private static let codeWords = try! NSRegularExpression(
+        pattern: #"\b(code|kode|verif|bekræft|one[- ]time|otp|pin|passcode|engangs|login|log ind|sign[- ]in|2fa|two[- ]factor)"#,
+        options: [.caseInsensitive])
+    private static let codeDigits = try! NSRegularExpression(
+        pattern: #"(?<![\d.,:/])(?<!\d-)(\d{3}[ -]\d{3}|\d{4,8})(?![\d.,:/-]|\s?(kr|dkk|eur|usd|%))"#,
+        options: [.caseInsensitive])
+
+    /// A sign-in or verification code in a subject or preview ("Your code is 482 913" → "482913").
+    static func code(in text: String) -> String? {
+        let range = NSRange(text.startIndex..., in: text)
+        guard codeWords.firstMatch(in: text, range: range) != nil,
+              let m = codeDigits.firstMatch(in: text, range: range),
+              let r = Range(m.range(at: 1), in: text) else { return nil }
+        let digits = text[r].filter { $0.isNumber }
+        // Years ("© 2026") aren't codes.
+        if digits.count == 4, let n = Int(digits), (1990...2100).contains(n) { return nil }
+        return String(digits)
+    }
+
+    static func code(for m: MessageSummary) -> String? {
+        code(in: m.subject) ?? code(in: m.snippet)
+    }
+
+    private static let receiptWords = try! NSRegularExpression(
+        pattern: #"\b(order|ordre|receipt|kvittering|invoice|faktura|booking|reservation|confirm|bekræft|payment|betaling|shipped|afsendt|levering|delivery|pakke|parcel|tracking|purchase|køb)"#,
+        options: [.caseInsensitive])
+
+    /// Orders, receipts, invoices, bookings and deliveries, judged by the subject.
+    static func isReceipt(_ m: MessageSummary) -> Bool {
+        receiptWords.firstMatch(in: m.subject, range: NSRange(m.subject.startIndex..., in: m.subject)) != nil
+    }
+
+    /// A saved draft made ready to send later: Bcc taken out of the headers (it's only for the
+    /// envelope), Date set to now. Returns the recipients from To, Cc and Bcc.
+    static func prepareScheduled(_ bytes: [UInt8], now: Date = Date()) -> (message: [UInt8], recipients: [String]) {
+        let (head, body) = MIME.splitHeaderBody(bytes)
+        let h = MIMEHeaders.parse(head)
+        let recipients = (MailAddress.parseList(h["to"]) + MailAddress.parseList(h["cc"]) + MailAddress.parseList(h["bcc"]))
+            .map { $0.email }.filter { !$0.isEmpty }
+        var lines: [String] = []
+        var skipping = false
+        for raw in String(decoding: head, as: UTF8.self).components(separatedBy: "\n") {
+            let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
+            if line.first == " " || line.first == "\t" {
+                if !skipping { lines.append(line) }
+                continue
+            }
+            let name = line.split(separator: ":", maxSplits: 1).first.map { $0.lowercased() } ?? ""
+            skipping = name == "bcc" || name == "date"
+            if name == "date" { lines.append("Date: " + MailDate.outgoing.string(from: now)) }
+            if !skipping { lines.append(line) }
+        }
+        return (message: Array((lines.joined(separator: "\r\n") + "\r\n\r\n").utf8) + body, recipients: recipients)
+    }
+}
+
+/// How a mailing list says you can leave it (the List-Unsubscribe header, RFC 2369 and RFC 8058).
+struct Unsubscribe: Equatable {
+    var web: URL?
+    var mailto: URL?
+    /// The sender accepts a background POST to `web`, so no page has to be opened.
+    var oneClick: Bool
+
+    init?(header: String?, post: String?) {
+        guard let header = header else { return nil }
+        let links = header.components(separatedBy: "<").dropFirst()
+            .compactMap { $0.components(separatedBy: ">").first }
+            .compactMap { URL(string: $0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        web = links.first { $0.scheme?.lowercased() == "https" } ?? links.first { $0.scheme?.lowercased() == "http" }
+        mailto = links.first { $0.scheme?.lowercased() == "mailto" }
+        oneClick = web?.scheme?.lowercased() == "https"
+            && (post ?? "").lowercased().replacingOccurrences(of: " ", with: "").contains("list-unsubscribe=one-click")
+        if web == nil && mailto == nil { return nil }
+    }
+
+    /// True when the app can do it without opening a web page.
+    var isAutomatic: Bool { oneClick || mailto != nil }
+}
+
+/// Conversations: messages that reply to each other (by Message-ID, References and In-Reply-To).
+enum Threads {
+    /// Groups a newest-first list; groups keep that order, each newest first.
+    static func group(_ list: [MessageSummary]) -> [[MessageSummary]] {
+        var parent = Array(list.indices)
+        func root(_ i: Int) -> Int {
+            var i = i
+            while parent[i] != i { parent[i] = parent[parent[i]]; i = parent[i] }
+            return i
+        }
+        var byID: [String: Int] = [:]
+        for (i, m) in list.enumerated() { if let id = m.messageID { byID[id] = i } }
+        for (i, m) in list.enumerated() {
+            for ref in m.references { if let j = byID[ref] { parent[root(i)] = root(j) } }
+        }
+        var groups: [Int: [MessageSummary]] = [:]
+        var order: [Int] = []
+        for (i, m) in list.enumerated() {
+            let r = root(i)
+            if groups[r] == nil { order.append(r) }
+            groups[r, default: []].append(m)
+        }
+        return order.map { groups[$0] ?? [] }
+    }
 }
 
 struct MailAttachment: Identifiable {

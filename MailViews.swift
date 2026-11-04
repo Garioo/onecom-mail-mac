@@ -24,6 +24,8 @@ struct SettingsView: View {
                 .tabItem { Label("Auto-Reply", systemImage: "arrowshape.turn.up.left") }
             BlockedSendersSettings(store: store)
                 .tabItem { Label("Blocked", systemImage: "hand.raised") }
+            RulesSettings(store: store)
+                .tabItem { Label("Rules", systemImage: "wand.and.stars") }
         }
         .padding(20)
         .frame(width: 480, height: 400)
@@ -169,6 +171,7 @@ struct MailRootView: View {
 struct MailMainView: View {
     @ObservedObject var store: MailStore
     @AppStorage("messageListWidth") private var listWidth = 390.0
+    @Environment(\.undoManager) private var undoManager
 
     var body: some View {
         VStack(spacing: 0) {
@@ -191,6 +194,13 @@ struct MailMainView: View {
         .sheet(item: $store.cleanup) { model in
             CleanupView(model: model, store: store) { store.cleanup = nil }
         }
+        .sheet(item: $store.attachmentBrowser) { model in
+            AttachmentBrowserView(model: model, store: store) { store.attachmentBrowser = nil }
+        }
+        .sheet(item: $store.snoozePicker) { request in
+            SnoozePickerView(request: request, store: store)
+        }
+        .onAppear { store.undoManager = undoManager }
     }
 }
 
@@ -370,6 +380,16 @@ struct MessageListView: View {
         }
     }
 
+    private func remindMenu(_ ids: Set<String>) -> some View {
+        Menu("Remind Me") {
+            ForEach(SnoozeChoice.allCases) { choice in
+                Button("\(choice.title) (\(Relative.string(choice.date())))") { store.snooze(ids, until: choice.date()) }
+            }
+            Divider()
+            Button("Choose Date…") { store.snoozePicker = SnoozeRequest(ids: ids) }
+        }
+    }
+
     @ViewBuilder
     private func menu(for message: MessageSummary) -> some View {
         let many = store.selection.count > 1 && store.selection.contains(message.id)
@@ -385,6 +405,7 @@ struct MessageListView: View {
                 Button("Archive \(n) Messages") { store.archiveSelection() }
             }
             moveMenu(store.selection, from: nil)
+            remindMenu(store.selection)
             Divider()
             Button("Delete \(n) Messages") { store.deleteSelection() }
         } else {
@@ -397,6 +418,13 @@ struct MessageListView: View {
                 Button("Archive") { store.archive(message.id) }
             }
             moveMenu([message.id], from: message.folder)
+            remindMenu([message.id])
+            if message.folder == store.snoozedFolder?.path, store.scheduleNote(for: message) != nil {
+                Button("Bring Back Now") { store.wakeNow(message) }
+            }
+            if store.isScheduledToSend(message) {
+                Button("Don't Send Later") { store.cancelSendLater(message) }
+            }
             if let sender = message.from {
                 Divider()
                 Button("Select All Loaded from \(sender.display)") {
@@ -424,92 +452,146 @@ struct MessageListView: View {
     }
 
     var body: some View {
-        let items = store.visibleMessages
+        let threads = store.visibleThreads
+        let items = threads.map(MessageRow.summary(of:))
+        let sizes = Dictionary(uniqueKeysWithValues: threads.map { ($0[0].id, $0.count) })
         let searching = store.isServerSearchActive
         let sections = DateSections.group(items)
-        ZStack(alignment: .top) {
-            List(selection: $store.selection) {
-                ForEach(Array(sections.enumerated()), id: \.offset) { pair in
-                    Section(header: SectionHeader(title: pair.element.title, textSize: textSize)) {
-                        ForEach(pair.element.items) { message in
-                            let folder = store.folder(path: message.folder)
-                            let showRecipient = folder?.role == .sent || folder?.role == .drafts
-                            MessageRow(message: message, showRecipient: showRecipient,
-                                       folderName: searching ? folder?.name : nil, textSize: textSize)
-                                .tag(message.id)
-                                .contextMenu { menu(for: message) }
-                                .onDrag {
-                                    // Dragging a selected row takes the whole selection along.
-                                    MessageDrag.provider(store.selection.contains(message.id)
-                                                         ? store.selection : [message.id])
-                                }
-                                .swipeActions(edge: .leading) {
-                                    Button { store.toggleRead(message.id) } label: {
-                                        Label(message.seen ? "Unread" : "Read",
-                                              systemImage: message.seen ? "envelope.badge" : "envelope.open")
+        VStack(spacing: 0) {
+            if store.currentFolder?.role == .inbox && store.searchText.isEmpty {
+                Picker("Show", selection: $store.inboxFilter) {
+                    ForEach(InboxFilter.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .controlSize(.small)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 7)
+                Divider()
+            }
+            ZStack(alignment: .top) {
+                List(selection: $store.selection) {
+                    ForEach(Array(sections.enumerated()), id: \.offset) { pair in
+                        Section(header: SectionHeader(title: pair.element.title, textSize: textSize)) {
+                            ForEach(pair.element.items) { message in
+                                let folder = store.folder(path: message.folder)
+                                let showRecipient = folder?.role == .sent || folder?.role == .drafts
+                                MessageRow(message: message, showRecipient: showRecipient,
+                                           folderName: searching ? folder?.name : nil,
+                                           threadSize: sizes[message.id] ?? 1,
+                                           note: store.scheduleNote(for: message), textSize: textSize)
+                                    .tag(message.id)
+                                    .contextMenu { menu(for: message) }
+                                    .onDrag {
+                                        // Dragging a selected row takes the whole selection along.
+                                        MessageDrag.provider(store.selection.contains(message.id)
+                                                             ? store.selection : [message.id])
                                     }
-                                    .tint(.accentColor)
-                                }
-                                .swipeActions(edge: .trailing) {
-                                    Button(role: .destructive) { store.delete(message.id) } label: {
-                                        Label("Delete", systemImage: "trash")
+                                    .swipeActions(edge: .leading) {
+                                        Button { store.toggleRead(message.id) } label: {
+                                            Label(message.seen ? "Unread" : "Read",
+                                                  systemImage: message.seen ? "envelope.badge" : "envelope.open")
+                                        }
+                                        .tint(.accentColor)
                                     }
-                                    if store.canArchive(message.id) {
-                                        Button { store.archive(message.id) } label: {
-                                            Label("Archive", systemImage: "archivebox")
+                                    .swipeActions(edge: .trailing) {
+                                        Button(role: .destructive) { store.delete(message.id) } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                        if store.canArchive(message.id) {
+                                            Button { store.archive(message.id) } label: {
+                                                Label("Archive", systemImage: "archivebox")
+                                            }
                                         }
                                     }
-                                }
+                            }
                         }
                     }
-                }
-                if store.canLoadMore && store.searchText.isEmpty && !items.isEmpty {
-                    HStack {
-                        Spacer()
-                        Button(store.isLoadingList ? "Loading…" : "Load Older Messages") { store.loadMore() }
-                            .buttonStyle(.borderless)
-                            .disabled(store.isLoadingList)
-                        Spacer()
+                    if store.canLoadMore && store.searchText.isEmpty && !items.isEmpty {
+                        HStack {
+                            Spacer()
+                            Button(store.isLoadingList ? "Loading…" : "Load Older Messages") { store.loadMore() }
+                                .buttonStyle(.borderless)
+                                .disabled(store.isLoadingList)
+                            Spacer()
+                        }
+                        .padding(.vertical, 10)
                     }
-                    .padding(.vertical, 10)
                 }
-            }
-            .listStyle(.inset)
-            .onDeleteCommand {
-                store.deleteSelection()
-            }
+                .listStyle(.inset)
+                .onDeleteCommand {
+                    store.deleteSelection()
+                }
 
-            if items.isEmpty {
-                Group {
-                    if store.isLoadingList || store.isSearching {
-                        ProgressView()
-                    } else if store.searchText.isEmpty {
-                        EmptyState(symbol: "tray", title: "No Messages",
-                                   detail: "\(store.currentFolder?.name ?? "This mailbox") is empty.")
-                    } else {
-                        EmptyState(symbol: "magnifyingglass", title: "No Results",
-                                   detail: store.isServerSearchActive
-                                       ? "Nothing on the server matches “\(store.searchText)”."
-                                       : "Press Return to search the whole server.")
+                if items.isEmpty {
+                    Group {
+                        if store.isLoadingList || store.isSearching {
+                            ProgressView()
+                        } else if store.searchText.isEmpty && store.currentFolder?.role == .inbox && store.inboxFilter != .all {
+                            EmptyState(symbol: "line.3.horizontal.decrease.circle", title: "No \(store.inboxFilter.rawValue)",
+                                       detail: "Nothing in the loaded mail fits. Choose All to see everything.")
+                        } else if store.searchText.isEmpty && store.currentFolder?.role == .inbox {
+                            EmptyState(symbol: "checkmark.circle", title: "All Caught Up",
+                                       detail: "There's nothing in your Inbox.")
+                        } else if store.searchText.isEmpty {
+                            EmptyState(symbol: "tray", title: "No Messages",
+                                       detail: "\(store.currentFolder?.name ?? "This mailbox") is empty.")
+                        } else {
+                            EmptyState(symbol: "magnifyingglass", title: "No Results",
+                                       detail: store.isServerSearchActive
+                                           ? "Nothing on the server matches “\(store.searchText)”."
+                                           : "Press Return to search the whole server.")
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if store.isLoadingList {
+                    // Quiet "checking for mail" pill over the top of the list.
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.small)
+                        Text("Checking for mail…")
+                            .font(.system(size: 11))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(.top, 8)
+                    .transition(.opacity)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if store.isLoadingList {
-                // Quiet "checking for mail" pill over the top of the list.
-                HStack(spacing: 6) {
-                    ProgressView().controlSize(.small)
-                    Text("Checking for mail…")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(.regularMaterial, in: Capsule())
-                .padding(.top, 8)
-                .transition(.opacity)
             }
+            .overlay(alignment: .bottom) {
+                if let undo = store.undoable {
+                    UndoNotice(text: undo.summary) { store.undoLatest() }
+                        .padding(.bottom, 12)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+            }
+            .animation(.easeOut(duration: 0.2), value: store.isLoadingList)
+            .animation(.easeOut(duration: 0.22), value: store.undoable?.id)
         }
-        .animation(.easeOut(duration: 0.2), value: store.isLoadingList)
+    }
+}
+
+/// "Moved 3 messages to Trash · Undo", floating over the bottom of the list for a few seconds.
+struct UndoNotice: View {
+    let text: String
+    let undo: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(text)
+                .font(.system(size: 12))
+                .monospacedDigit()
+            Button("Undo", action: undo)
+                .buttonStyle(.borderless)
+                .font(.system(size: 12, weight: .semibold))
+                .help("Put them back (⌘Z)")
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 7)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color(nsColor: .separatorColor)))
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -544,7 +626,25 @@ struct MessageRow: View {
     let message: MessageSummary
     let showRecipient: Bool
     var folderName: String? = nil
+    /// How many messages the row's conversation holds.
+    var threadSize = 1
+    /// Shown instead of the date: when snoozed mail comes back, or when a draft is sent.
+    var note: String? = nil
     var textSize = 0
+
+    /// A sign-in code, offered on recent mail only.
+    private var code: String? {
+        Date().timeIntervalSince(message.date) < 86400 ? SmartMail.code(for: message) : nil
+    }
+
+    /// A conversation as one row: its newest message, unread if any message is, flagged if any is.
+    static func summary(of thread: [MessageSummary]) -> MessageSummary {
+        var head = thread[0]
+        head.seen = thread.allSatisfy { $0.seen }
+        head.flagged = thread.contains { $0.flagged }
+        head.hasAttachments = thread.contains { $0.hasAttachments }
+        return head
+    }
 
     private var person: MailAddress? { showRecipient ? message.to.first : message.from }
 
@@ -572,6 +672,16 @@ struct MessageRow: View {
                     Text(personText)
                         .font(.system(size: size(14), weight: message.seen ? .medium : .semibold))
                         .lineLimit(1)
+                    if threadSize > 1 {
+                        Text("\(threadSize)")
+                            .font(.system(size: size(11), weight: .medium))
+                            .monospacedDigit()
+                            .foregroundColor(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.primary.opacity(0.07)))
+                            .accessibilityLabel("\(threadSize) messages")
+                    }
                     Spacer(minLength: 6)
                     if let folderName = folderName {
                         Text(folderName)
@@ -599,15 +709,28 @@ struct MessageRow: View {
                             .foregroundColor(.orange)
                             .accessibilityLabel("Flagged")
                     }
-                    Text(MailDate.listString(message.date))
-                        .font(.system(size: size(12)))
-                        .foregroundColor(.secondary)
-                        .monospacedDigit()
+                    if let note = note {
+                        Label(note, systemImage: "clock")
+                            .font(.system(size: size(12)))
+                            .foregroundColor(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text(MailDate.listString(message.date))
+                            .font(.system(size: size(12)))
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                    }
                 }
-                Text(message.subject.isEmpty ? "(No subject)" : message.subject)
-                    .font(.system(size: size(13), weight: message.seen ? .regular : .medium))
-                    .foregroundColor(.primary.opacity(message.seen ? 0.8 : 1))
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(message.subject.isEmpty ? "(No subject)" : message.subject)
+                        .font(.system(size: size(13), weight: message.seen ? .regular : .medium))
+                        .foregroundColor(.primary.opacity(message.seen ? 0.8 : 1))
+                        .lineLimit(1)
+                    if let code = code {
+                        Spacer(minLength: 4)
+                        CodeChip(code: code, textSize: textSize)
+                    }
+                }
                 if !message.snippet.isEmpty {
                     Text(message.snippet)
                         .font(.system(size: size(13)))
@@ -666,14 +789,20 @@ struct ReaderView: View {
                 BulkSelectionView(store: store)
             } else if let opened = store.opened {
                 MessageDetailView(store: store, opened: opened)
+                    .id(opened.summary.id)
             } else if store.isLoadingMessage {
                 ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 VStack(spacing: 14) {
                     EmptyState(symbol: "envelope", title: "No Message Selected",
                                detail: "⌘-click or ⇧-click to select several messages at once.")
-                    Button { store.openCleanup() } label: {
-                        Label("Clean Up Mail…", systemImage: "wand.and.stars")
+                    HStack(spacing: 10) {
+                        Button { store.openCleanup() } label: {
+                            Label("Clean Up Mail…", systemImage: "wand.and.stars")
+                        }
+                        Button { store.openAttachmentBrowser() } label: {
+                            Label("Browse Attachments…", systemImage: "paperclip")
+                        }
                     }
                     .controlSize(.large)
                 }
@@ -740,8 +869,20 @@ struct MessageDetailView: View {
     let opened: OpenedMessage
     @AppStorage("mailTextSize") private var textSize = 0
     @AppStorage("darkenEmails") private var darkenEmails = true
+    @Environment(\.colorScheme) private var colorScheme
 
     private var s: MessageSummary { opened.summary }
+    private var asDesigned: Bool { store.showsAsDesigned(s.from) }
+    /// "Show as Designed" only means something for HTML mail that's being darkened.
+    private var canShowAsDesigned: Bool {
+        darkenEmails && colorScheme == .dark && opened.parsed.html != nil
+    }
+    private var unsubscribe: Unsubscribe? {
+        Unsubscribe(header: opened.parsed.headers["list-unsubscribe"], post: opened.parsed.headers["list-unsubscribe-post"])
+    }
+    private var conversation: [MessageSummary] {
+        store.selectedID.map { store.thread(of: $0) } ?? []
+    }
     private func size(_ base: CGFloat) -> CGFloat { MailType.size(base, textSize) }
 
     private func recipients(_ label: String, _ list: [MailAddress]) -> some View {
@@ -787,18 +928,53 @@ struct MessageDetailView: View {
                                 .font(.system(size: size(12)))
                                 .foregroundColor(.secondary)
                         }
-                        Group {
-                            if !s.to.isEmpty { recipients("To:", s.to) }
-                            if !s.cc.isEmpty { recipients("Cc:", s.cc) }
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                if !s.to.isEmpty { recipients("To:", s.to) }
+                                if !s.cc.isEmpty { recipients("Cc:", s.cc) }
+                            }
+                            .font(.system(size: size(12)))
+                            .lineLimit(2)
+                            Spacer(minLength: 8)
+                            if canShowAsDesigned {
+                                Button(asDesigned ? "Darken Email" : "Show as Designed") {
+                                    store.setShowsAsDesigned(s.from, !asDesigned)
+                                }
+                                .buttonStyle(.borderless)
+                                .font(.system(size: size(12)))
+                                .help(asDesigned
+                                      ? "Darken mail from \(s.from?.display ?? "this sender") to match dark mode"
+                                      : "Show mail from \(s.from?.display ?? "this sender") on white, the way it was designed")
+                            }
                         }
-                        .font(.system(size: size(12)))
-                        .lineLimit(2)
                     }
                     .textSelection(.enabled)
                 }
 
+                if let code = SmartMail.code(for: s) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "key").foregroundColor(.secondary)
+                        Text("Sign-in code")
+                            .font(.system(size: size(12)))
+                            .foregroundColor(.secondary)
+                        CodeChip(code: code, textSize: textSize)
+                        Spacer(minLength: 8)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.045)))
+                }
+
                 if !opened.parsed.attachments.isEmpty {
                     AttachmentStrip(attachments: opened.parsed.attachments)
+                }
+
+                if let unsubscribe = unsubscribe, s.from?.email.lowercased() != store.account?.email.lowercased() {
+                    UnsubscribeNotice(store: store, unsubscribe: unsubscribe, sender: s.from, textSize: textSize)
+                }
+
+                if conversation.count > 1 {
+                    ConversationStrip(store: store, messages: conversation, showing: s.id, textSize: textSize)
                 }
 
                 if opened.parsed.hasRemoteContent && !store.allowRemoteContent {
@@ -811,6 +987,11 @@ struct MessageDetailView: View {
                         Spacer(minLength: 8)
                         Button("Load Images") { store.allowRemoteContent = true }
                             .controlSize(.small)
+                        if let sender = s.from {
+                            Button("Always for This Sender") { store.trustImages(from: sender) }
+                                .controlSize(.small)
+                                .help("Load images in mail from \(sender.email) without asking. You can undo this in Settings → Rules.")
+                        }
                     }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
@@ -823,12 +1004,145 @@ struct MessageDetailView: View {
 
             Divider().padding(.horizontal, 28)
 
+            let paper = canShowAsDesigned && asDesigned
             MessageBodyView(html: opened.parsed.displayHTML,
-                            key: "\(s.id)#\(store.allowRemoteContent)#\(darkenEmails)",
+                            key: "\(s.id)#\(store.allowRemoteContent)#\(darkenEmails)#\(paper)",
                             allowRemote: store.allowRemoteContent,
-                            darken: darkenEmails,
+                            darken: darkenEmails && !paper,
+                            paper: paper,
                             zoom: MailType.scale(textSize))
         }
+    }
+}
+
+/// A newsletter's "leave this list" link, offered quietly under the header.
+struct UnsubscribeNotice: View {
+    @ObservedObject var store: MailStore
+    let unsubscribe: Unsubscribe
+    let sender: MailAddress?
+    var textSize = 0
+
+    private enum Phase { case idle, working, done, openedPage, failed(String) }
+    @State private var phase = Phase.idle
+    @State private var confirming = false
+
+    private var who: String { sender?.display ?? "this sender" }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            switch phase {
+            case .done, .openedPage:
+                Image(systemName: "checkmark.circle.fill").foregroundColor(.accentColor)
+            default:
+                Image(systemName: "newspaper").foregroundColor(.secondary)
+            }
+            Group {
+                switch phase {
+                case .idle, .working: Text("This is a newsletter from \(who).")
+                case .done: Text("Unsubscribed. It can take a few days for their mail to stop.")
+                case .openedPage: Text("Finish unsubscribing on the page that opened in your browser.")
+                case .failed(let why): Text(why).foregroundColor(.red)
+                }
+            }
+            .font(.system(size: MailType.size(12, textSize)))
+            .foregroundColor(.secondary)
+            .lineLimit(2)
+            Spacer(minLength: 8)
+            switch phase {
+            case .idle, .failed:
+                Button("Unsubscribe…") { confirming = true }
+                    .controlSize(.small)
+            case .working:
+                ProgressView().controlSize(.small)
+            case .done, .openedPage:
+                if let sender = sender {
+                    Button("Clean Up Their Mail…") { store.openCleanup(sender: sender) }
+                        .controlSize(.small)
+                        .help("Move the mail you already have from \(who) to Trash")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.045)))
+        .confirmationDialog("Unsubscribe from \(who)?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Unsubscribe") { run() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(unsubscribe.isAutomatic
+                 ? "one.com Mail asks \(who) to stop sending you these emails."
+                 : "\(who) needs you to confirm on their website, which opens in your browser.")
+        }
+    }
+
+    private func run() {
+        phase = .working
+        Task {
+            do {
+                phase = try await store.unsubscribe(unsubscribe) == .done ? .done : .openedPage
+            } catch {
+                phase = .failed("Couldn't unsubscribe: " + error.localizedDescription)
+            }
+        }
+    }
+}
+
+/// The other messages of the selected conversation, oldest first; click one to read it.
+struct ConversationStrip: View {
+    @ObservedObject var store: MailStore
+    let messages: [MessageSummary]
+    let showing: String
+    var textSize = 0
+
+    private func size(_ base: CGFloat) -> CGFloat { MailType.size(base, textSize) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("\(messages.count) messages in this conversation")
+                .font(.system(size: size(12), weight: .semibold))
+                .foregroundColor(.secondary)
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(messages.reversed()) { m in
+                        Button { store.show(m.id) } label: {
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(m.id == showing ? Color.accentColor : Color.clear)
+                                    .frame(width: 6, height: 6)
+                                Text(m.from?.display ?? "(Unknown sender)")
+                                    .font(.system(size: size(12), weight: m.id == showing ? .semibold : .regular))
+                                    .lineLimit(1)
+                                    .frame(width: 150 * MailType.scale(textSize), alignment: .leading)
+                                Text(m.snippet.isEmpty ? m.subject : m.snippet)
+                                    .font(.system(size: size(12)))
+                                    .foregroundColor(.secondary)
+                                    .lineLimit(1)
+                                Spacer(minLength: 8)
+                                Text(MailDate.listString(m.date))
+                                    .font(.system(size: size(11)))
+                                    .foregroundColor(.secondary)
+                                    .monospacedDigit()
+                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 5)
+                            .contentShape(Rectangle())
+                            .background(m.id == showing ? Color.primary.opacity(0.05) : Color.clear)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("\(m.from?.display ?? "Unknown sender"), \(MailDate.longString(m.date))")
+                        .accessibilityAddTraits(m.id == showing ? .isSelected : [])
+                    }
+                }
+            }
+            .frame(maxHeight: messages.count > 5 ? 150 * MailType.scale(textSize) : nil)
+            .fixedSize(horizontal: false, vertical: messages.count <= 5)
+            .padding(.bottom, 4)
+        }
+        .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.045)))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -839,7 +1153,7 @@ struct AttachmentStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 ForEach(attachments) { attachment in
-                    Button { AttachmentSaver.open(attachment) } label: {
+                    Button { QuickLook.shared.show(attachment.data, filename: attachment.filename) } label: {
                         HStack(spacing: 6) {
                             Image(nsImage: AttachmentSaver.icon(for: attachment.filename))
                                 .resizable()
@@ -858,8 +1172,9 @@ struct AttachmentStrip: View {
                         .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
                     }
                     .buttonStyle(.plain)
-                    .help("Save to Downloads and open")
+                    .help("Preview \(attachment.filename)")
                     .contextMenu {
+                        Button("Quick Look") { QuickLook.shared.show(attachment.data, filename: attachment.filename) }
                         Button("Open") { AttachmentSaver.open(attachment) }
                         Button("Save to Downloads") { AttachmentSaver.save(attachment, reveal: true) }
                     }
@@ -913,6 +1228,7 @@ struct MessageBodyView: NSViewRepresentable {
     let key: String
     let allowRemote: Bool
     var darken = true
+    var paper = false
     var zoom: CGFloat = 1
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -931,11 +1247,32 @@ struct MessageBodyView: NSViewRepresentable {
         if webView.pageZoom != zoom { webView.pageZoom = zoom }
         guard context.coordinator.loadedKey != key else { return }
         context.coordinator.loadedKey = key
-        webView.loadHTMLString(MailHTML.wrap(html, allowRemote: allowRemote, darken: darken), baseURL: nil)
+        // Hidden until drawn, so a message never flashes white (or half-styled) before it's ready.
+        webView.alphaValue = 0
+        webView.loadHTMLString(MailHTML.wrap(html, allowRemote: allowRemote, darken: darken, paper: paper), baseURL: nil)
     }
 
     final class Coordinator: NSObject, WKNavigationDelegate {
         var loadedKey: String?
+
+        private func reveal(_ webView: WKWebView) {
+            guard webView.alphaValue < 1 else { return }
+            if NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                webView.alphaValue = 1
+                return
+            }
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.18
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                webView.animator().alphaValue = 1
+            }
+        }
+
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { reveal(webView) }
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { reveal(webView) }
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+            reveal(webView)
+        }
 
         func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -965,7 +1302,18 @@ enum MailHTML {
     img,video,picture,svg,canvas,iframe,[background],[style*="background-image"]{filter:invert(1) hue-rotate(180deg)}}
     """
 
-    static func wrap(_ html: String, allowRemote: Bool, darken: Bool = false) -> String {
+    /// Mail that ships its own dark styles (a prefers-color-scheme rule or a color-scheme declaration)
+    /// looks right as designed; inverting it would flip those already-dark colours back to light.
+    private static func darkCSS(for html: String) -> String {
+        html.range(of: #"prefers-color-scheme\s*:\s*dark|color-scheme"[^>]*dark|color-scheme\s*:[^;}"]*dark"#,
+                   options: [.regularExpression, .caseInsensitive]) != nil
+            ? ":root{color-scheme:light dark}" : darkenCSS
+    }
+
+    /// "Show as Designed": the mail on white, as its sender drew it, even in dark mode.
+    private static let paperCSS = ":root{color-scheme:light}html{background:#fff;color:#000}"
+
+    static func wrap(_ html: String, allowRemote: Bool, darken: Bool = false, paper: Bool = false) -> String {
         let policy = allowRemote
             ? "default-src 'none'; img-src data: https: http:; media-src https: http:; style-src 'unsafe-inline' https: http:; font-src data: https: http:"
             : "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
@@ -973,7 +1321,7 @@ enum MailHTML {
         <meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="\(policy)">\
         <style>body{margin:22px 28px;font:14px -apple-system,BlinkMacSystemFont,sans-serif;\
         overflow-wrap:break-word;word-wrap:break-word}img{max-width:100%;height:auto}\
-        pre{white-space:pre-wrap}\(darken && !html.contains("<div class=\"plain\">") ? darkenCSS : "")</style>
+        pre{white-space:pre-wrap}\(paper ? paperCSS : darken && !html.contains("<div class=\"plain\">") ? darkCSS(for: html) : "")</style>
         """
         if let r = html.range(of: "<head[^>]*>", options: [.regularExpression, .caseInsensitive]) {
             var s = html
@@ -1145,6 +1493,8 @@ final class ComposeModel: ObservableObject {
     @Published var showBcc: Bool
     @Published private(set) var lastSaved: Date?
     @Published private(set) var dirty = false
+    /// Remind me in three days if nobody answers.
+    @Published var followUp = false
 
     let store: MailStore
     let editor: RichTextController
@@ -1207,6 +1557,7 @@ final class ComposeModel: ObservableObject {
             undoCountdown = nil
             do {
                 try await store.send(current, messageID: id)
+                if followUp { store.scheduleFollowUp(messageID: id, subject: current.subject, who: Self.who(current)) }
                 if hadDraft { await store.discardDraft(messageID: id, replacing: replacing) }
                 isSending = false
                 finish()
@@ -1214,6 +1565,28 @@ final class ComposeModel: ObservableObject {
                 error = failure.localizedDescription
                 isSending = false
             }
+        }
+    }
+
+    /// "Anna" or "Anna and 2 others", for reminders.
+    private static func who(_ d: ComposeDraft) -> String {
+        let people = MailAddress.parseList(d.to) + MailAddress.parseList(d.cc)
+        guard let first = people.first?.display else { return "" }
+        return people.count == 1 ? first : "\(first) and \(people.count - 1) other\(people.count == 2 ? "" : "s")"
+    }
+
+    /// Saves the message to Drafts and sends it from there at `date` (while the app is open).
+    func sendLater(at date: Date) {
+        let current = currentDraft()
+        if (MailAddress.parseList(current.to) + MailAddress.parseList(current.cc) + MailAddress.parseList(current.bcc)).isEmpty {
+            error = "Add at least one recipient."
+            return
+        }
+        Task {
+            guard await saveDraft() else { return }
+            store.scheduleSend(messageID: messageID, at: date, subject: current.subject,
+                               who: Self.who(current), followUp: followUp)
+            finish()
         }
     }
 
@@ -1296,8 +1669,34 @@ struct ComposeField: View {
     let label: String
     @Binding var text: String
     var trailing: AnyView? = nil
+    /// For address fields: people matching the name being typed.
+    var suggest: ((String) -> [MailAddress])? = nil
+
+    @FocusState private var focused: Bool
+
+    /// The address being typed: whatever follows the last comma.
+    private var typing: String {
+        String(text.split(separator: ",", omittingEmptySubsequences: false).last ?? "")
+            .trimmingCharacters(in: .whitespaces)
+    }
+
+    private var suggestions: [MailAddress] {
+        guard focused, let suggest = suggest, !typing.isEmpty else { return [] }
+        let list = suggest(typing)
+        // Already typed out in full: nothing left to suggest.
+        return list.contains { $0.editable.caseInsensitiveCompare(typing) == .orderedSame
+            || $0.email.caseInsensitiveCompare(typing) == .orderedSame } ? [] : list
+    }
+
+    private func pick(_ address: MailAddress) {
+        var parts = text.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        parts.removeLast()
+        text = (parts.map { $0.trimmingCharacters(in: .whitespaces) } + [address.editable])
+            .filter { !$0.isEmpty }.joined(separator: ", ") + ", "
+    }
 
     var body: some View {
+        let matches = suggestions
         VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Text(label)
@@ -1305,12 +1704,48 @@ struct ComposeField: View {
                     .frame(width: 62, alignment: .leading)
                 TextField("", text: $text)
                     .textFieldStyle(.plain)
+                    .focused($focused)
                     .accessibilityLabel(label)
+                    .onSubmit { if let first = matches.first { pick(first) } }
                 if let trailing = trailing { trailing }
             }
             .font(.system(size: 14))
             .padding(.horizontal, 20)
             .frame(minHeight: 36)
+            // Suggestions sit in the flow (not floating), so nothing can draw over them.
+            if !matches.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(Array(matches.enumerated()), id: \.offset) { i, address in
+                        Button { pick(address) } label: {
+                            HStack(spacing: 8) {
+                                AvatarView(address: address, size: 22)
+                                Text(address.name.isEmpty ? address.email : address.name)
+                                    .font(.system(size: 13, weight: .medium))
+                                if !address.name.isEmpty {
+                                    Text(address.email)
+                                        .font(.system(size: 12))
+                                        .foregroundColor(.secondary)
+                                }
+                                Spacer(minLength: 12)
+                                if i == 0 {
+                                    Text("Return to add")
+                                        .font(.system(size: 11))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .contentShape(Rectangle())
+                            .background(RoundedRectangle(cornerRadius: 6)
+                                .fill(i == 0 ? Color.accentColor.opacity(0.12) : Color.clear))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.leading, 80)
+                .padding(.trailing, 20)
+                .padding(.bottom, 6)
+            }
             Divider().padding(.leading, 20)
         }
     }
@@ -1324,25 +1759,36 @@ struct ComposeView: View {
             if let error = model.error {
                 ErrorBanner(text: error) { model.error = nil }
             }
-            if let left = model.undoCountdown {
+            if model.isSending {
                 HStack(spacing: 8) {
-                    Image(systemName: "paperplane.fill").foregroundColor(.accentColor)
-                    Text("Sending in \(left) s…").font(.system(size: 12))
-                    Spacer()
-                    Button("Undo") { model.undoSend() }
-                        .controlSize(.small)
+                    if let left = model.undoCountdown {
+                        Image(systemName: "paperplane.fill").foregroundColor(.accentColor)
+                        Text(left == 1 ? "Sending in 1 second…" : "Sending in \(left) seconds…")
+                            .font(.system(size: 12))
+                            .monospacedDigit()
+                        Spacer()
+                        Button("Undo") { model.undoSend() }
+                            .controlSize(.small)
+                    } else {
+                        ProgressView().controlSize(.small)
+                        Text("Sending…").font(.system(size: 12))
+                        Spacer()
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 7)
                 .background(Color.accentColor.opacity(0.1))
+                .transition(.move(edge: .top).combined(with: .opacity))
             }
-            ComposeField(label: "To:", text: $model.draft.to)
+            let suggest = model.store.addressSuggestions(for:)
+            ComposeField(label: "To:", text: $model.draft.to, suggest: suggest)
             ComposeField(label: "Cc:", text: $model.draft.cc, trailing: model.showBcc ? nil : AnyView(
                 Button("Bcc") { model.showBcc = true }
                     .buttonStyle(.borderless)
-                    .help("Add a Bcc field: those people get the email without others seeing it")))
+                    .help("Add a Bcc field: those people get the email without others seeing it")),
+                suggest: suggest)
             if model.showBcc {
-                ComposeField(label: "Bcc:", text: $model.draft.bcc)
+                ComposeField(label: "Bcc:", text: $model.draft.bcc, suggest: suggest)
             }
             ComposeField(label: "Subject:", text: $model.draft.subject)
             FormatBar(editor: model.editor)
@@ -1383,6 +1829,7 @@ struct ComposeView: View {
             }
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .animation(.easeOut(duration: 0.2), value: model.isSending)
         .frame(minWidth: 560, minHeight: 420)
         .onDrop(of: [.fileURL], isTargeted: nil) { providers in
             for p in providers {

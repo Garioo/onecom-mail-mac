@@ -68,7 +68,7 @@ for arch in $ARCHS; do
     -framework Cocoa -framework SwiftUI -framework WebKit -framework Network -framework Security \
     -framework UserNotifications -framework ServiceManagement -framework UniformTypeIdentifiers \
     OneMail.swift Updater.swift RichText.swift MailMIME.swift MailIMAP.swift MailStore.swift MailViews.swift \
-    MailCleanup.swift \
+    MailCleanup.swift MailSmart.swift \
     -o "build/$EXE-$arch"
   SLICES+=("build/$EXE-$arch")
 done

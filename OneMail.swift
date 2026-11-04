@@ -77,8 +77,14 @@ final class NotificationHandler: NSObject, UNUserNotificationCenterDelegate {
 
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse,
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
+        let code = response.notification.request.content.userInfo["code"] as? String
+        let copyOnly = response.actionIdentifier == "copy-code"
         Task { @MainActor in
-            (NSApp.delegate as? AppDelegate)?.showMail(nil)
+            if copyOnly, let code = code {
+                Clipboard.copy(code)
+            } else {
+                (NSApp.delegate as? AppDelegate)?.showMail(nil)
+            }
         }
         completionHandler()
     }
@@ -323,6 +329,8 @@ extension NSToolbarItem.Identifier {
     static let send = NSToolbarItem.Identifier("send")
     static let attach = NSToolbarItem.Identifier("attach")
     static let saveDraft = NSToolbarItem.Identifier("saveDraft")
+    static let remindMe = NSToolbarItem.Identifier("remindMe")
+    static let sendLater = NSToolbarItem.Identifier("sendLater")
 }
 
 // MARK: - App
@@ -389,12 +397,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let center = UNUserNotificationCenter.current()
         center.delegate = notificationHandler
         center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        center.setNotificationCategories([UNNotificationCategory(
+            identifier: "code",
+            actions: [UNNotificationAction(identifier: "copy-code", title: "Copy Code", options: [])],
+            intentIdentifiers: [])])
 
         mailStore = MailStore()
         mailStore.onUnreadChanged = { [weak self] count in self?.unreadChanged(count) }
         mailStore.onNewMail = { [weak self] messages in self?.notifyNewMail(messages) }
         mailStore.onCompose = { [weak self] draft in self?.openCompose(draft) }
         mailStore.onFolderChanged = { [weak self] in self?.titlesChanged() }
+        mailStore.onReminder = { title, body in
+            let note = UNMutableNotificationContent()
+            note.title = title
+            note.body = body
+            note.sound = .default
+            UNUserNotificationCenter.current().add(
+                UNNotificationRequest(identifier: UUID().uuidString, content: note, trigger: nil))
+        }
         mailView = NSHostingView(rootView: MailRootView(store: mailStore))
 
         buildMainWindow()
@@ -507,6 +527,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         webToolbar = makeToolbar("MainToolbar")
         window.toolbar = mailToolbar
         window.toolbarStyle = .unified
+        // The toolbar remembers its layout, so a button added in an update is put in once by hand.
+        if !UserDefaults.standard.bool(forKey: "addedRemindMeButton") {
+            UserDefaults.standard.set(true, forKey: "addedRemindMeButton")
+            if !mailToolbar.items.contains(where: { $0.itemIdentifier == .remindMe }) {
+                let at = mailToolbar.items.firstIndex { $0.itemIdentifier == .flag }.map { $0 + 1 } ?? mailToolbar.items.count
+                mailToolbar.insertItem(withItemIdentifier: .remindMe, at: at)
+            }
+        }
     }
 
     func makeWebView() -> WKWebView {
@@ -625,6 +653,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             note.title = m.from?.display ?? "New email"
             note.subtitle = m.subject.isEmpty ? "(No subject)" : m.subject
             note.body = m.snippet
+            if let code = SmartMail.code(for: m) {
+                note.body = "Code: \(code)"
+                note.categoryIdentifier = "code"
+                note.userInfo = ["code": code]
+            }
         } else {
             note.title = "\(messages.count) new emails"
             let senders = messages.prefix(4).compactMap { $0.from?.display }
@@ -734,9 +767,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         switch toolbar.identifier {
         case "MailToolbar":
             return [.toggleSidebar, .sidebarTrackingSeparator, .flexibleSpace, .cleanUp, .compose, .space,
-                    .reply, .replyAll, .forwardMessage, .space, .archive, .trash, .flag, .search]
+                    .reply, .replyAll, .forwardMessage, .space, .archive, .trash, .flag, .remindMe, .search]
         case "ComposeToolbar":
-            return [.send, .flexibleSpace, .attach, .saveDraft]
+            return [.send, .sendLater, .flexibleSpace, .attach, .saveDraft]
         default:
             return [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .flexibleSpace, .home, .reload, .browser]
         }
@@ -746,9 +779,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         switch toolbar.identifier {
         case "MailToolbar":
             return [.toggleSidebar, .sidebarTrackingSeparator, .cleanUp, .compose, .getMail, .reply, .replyAll,
-                    .forwardMessage, .archive, .trash, .flag, .readUnread, .search, .flexibleSpace, .space]
+                    .forwardMessage, .archive, .trash, .flag, .readUnread, .remindMe, .search, .flexibleSpace, .space]
         case "ComposeToolbar":
-            return [.send, .attach, .saveDraft, .flexibleSpace, .space]
+            return [.send, .sendLater, .attach, .saveDraft, .flexibleSpace, .space]
         default:
             return [.toggleSidebar, .sidebarTrackingSeparator, .back, .forward, .home, .reload, .browser, .flexibleSpace, .space]
         }
@@ -817,6 +850,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return item
         case .attach: return make("Attach", "paperclip", #selector(attachInCompose(_:)))
         case .saveDraft: return make("Save Draft", "square.and.arrow.down", #selector(saveDraftInCompose(_:)))
+        case .remindMe:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.label = "Remind Me"
+            item.paletteLabel = "Remind Me"
+            item.toolTip = "Snooze: hide it now, bring it back to the Inbox later"
+            item.image = symbol("clock", "Remind Me")
+            item.menu = remindMenu()
+            return item
+        case .sendLater:
+            let item = NSMenuToolbarItem(itemIdentifier: id)
+            item.label = "Send Later"
+            item.paletteLabel = "Send Later"
+            item.toolTip = "Send later, or get reminded if nobody replies"
+            item.image = symbol("clock.arrow.circlepath", "Send Later")
+            let menu = NSMenu()
+            for choice in SendLaterChoice.allCases {
+                let mi = menu.addItem(withTitle: "Send " + choice.title, action: #selector(sendLaterInCompose(_:)), keyEquivalent: "")
+                mi.tag = choice.rawValue
+                mi.target = self
+            }
+            menu.addItem(.separator())
+            let follow = menu.addItem(withTitle: "Remind Me If No Reply in 3 Days", action: #selector(toggleFollowUpInCompose(_:)), keyEquivalent: "")
+            follow.target = self
+            item.menu = menu
+            return item
         default: return nil
         }
     }
@@ -839,7 +897,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             }
             return mailShown && hasSelection
         case .archive: return mailShown && hasSelection && mailStore.selectionCanArchive
-        case .send, .attach, .saveDraft:
+        case .remindMe: return mailShown && hasSelection
+        case .send, .attach, .saveDraft, .sendLater:
             guard let model = composeModel(for: item) else { return false }
             return !model.isSending && (item.itemIdentifier != .saveDraft || !model.isSavingDraft)
         default: return true
@@ -1015,6 +1074,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func sendCompose(_ sender: Any?) { composeTarget(sender)?.send() }
+
+    @objc func sendLaterInCompose(_ sender: NSMenuItem) {
+        guard let choice = SendLaterChoice(rawValue: sender.tag) else { return }
+        keyComposeModel?.sendLater(at: choice.date())
+    }
+
+    @objc func toggleFollowUpInCompose(_ sender: Any?) { keyComposeModel?.followUp.toggle() }
+
+    /// The Remind Me choices, for the toolbar and the Message menu.
+    func remindMenu() -> NSMenu {
+        let menu = NSMenu(title: "Remind Me")
+        for choice in SnoozeChoice.allCases {
+            let mi = menu.addItem(withTitle: choice.title, action: #selector(remindMe(_:)), keyEquivalent: "")
+            mi.tag = choice.rawValue
+            mi.target = self
+        }
+        menu.addItem(.separator())
+        let pick = menu.addItem(withTitle: "Choose Date…", action: #selector(remindMe(_:)), keyEquivalent: "")
+        pick.tag = -1
+        pick.target = self
+        return menu
+    }
+
+    @objc func remindMe(_ sender: NSMenuItem) {
+        let ids = mailStore.selection
+        guard !ids.isEmpty else { return }
+        if let choice = SnoozeChoice(rawValue: sender.tag) {
+            mailStore.snooze(ids, until: choice.date())
+        } else {
+            mailStore.snoozePicker = SnoozeRequest(ids: ids)
+        }
+    }
+
+    @objc func browseAttachments(_ sender: Any?) {
+        showMail(nil)
+        mailStore.openAttachmentBrowser()
+    }
     @objc func saveDraftInCompose(_ sender: Any?) { composeTarget(sender)?.saveDraftNow() }
 
     @objc func attachInCompose(_ sender: Any?) {
@@ -1133,6 +1229,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             return openCustomFolder != nil
         case #selector(toggleDarkenEmails(_:)):
             menuItem.state = darkenEmails ? .on : .off
+        case #selector(remindMe(_:)):
+            return mailStore?.account != nil && hasSelection
+        case #selector(browseAttachments(_:)):
+            return mailStore?.account != nil
+        case #selector(sendLaterInCompose(_:)):
+            return !(keyComposeModel?.isSending ?? true)
+        case #selector(toggleFollowUpInCompose(_:)):
+            menuItem.state = keyComposeModel?.followUp == true ? .on : .off
+            return !(keyComposeModel?.isSending ?? true)
+        case #selector(toggleConversations(_:)):
+            menuItem.state = mailStore?.groupsConversations ?? true ? .on : .off
         case #selector(sendCompose(_:)), #selector(attachInCompose(_:)):
             return !(keyComposeModel?.isSending ?? true)
         case #selector(saveDraftInCompose(_:)):
@@ -1422,6 +1529,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func toggleDarkenEmails(_ sender: Any?) { darkenEmails.toggle() }
+    @objc func toggleConversations(_ sender: Any?) { mailStore.groupsConversations.toggle() }
 
     func setZoom(_ value: CGFloat) {
         activeWebView?.pageZoom = min(max(value, 0.5), 3.0)
@@ -1508,6 +1616,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             add(m, "Zoom In", #selector(AppDelegate.zoomInPage(_:)), "+")
             add(m, "Zoom Out", #selector(AppDelegate.zoomOutPage(_:)), "-")
             add(m, "Darken Emails in Dark Mode", #selector(AppDelegate.toggleDarkenEmails(_:)), "")
+            add(m, "Organize by Conversation", #selector(AppDelegate.toggleConversations(_:)), "")
+            add(m, "Browse Attachments…", #selector(AppDelegate.browseAttachments(_:)), "")
             m.addItem(.separator())
             add(m, "Open Page in Browser", #selector(AppDelegate.openInBrowser(_:)), "o", [.command, .shift])
             add(m, "Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control])
@@ -1523,6 +1633,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             add(m, "Mark as Read/Unread", #selector(AppDelegate.toggleReadMessage(_:)), "u", [.command, .shift])
             add(m, "Flag/Unflag", #selector(AppDelegate.toggleFlagMessage(_:)), "l", [.command, .shift])
             add(m, "Archive", #selector(AppDelegate.archiveMessage(_:)), "a", [.command, .control])
+            let remind = m.addItem(withTitle: "Remind Me", action: nil, keyEquivalent: "")
+            remind.submenu = remindMenu()
             add(m, "Edit Draft", #selector(AppDelegate.editDraftMessage(_:)), "e")
             m.addItem(.separator())
             add(m, "Clean Up Mail…", #selector(AppDelegate.openCleanup(_:)), "k", [.command, .shift])

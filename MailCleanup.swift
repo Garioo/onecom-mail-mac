@@ -14,6 +14,8 @@ final class CleanupModel: ObservableObject, Identifiable {
         var size: Int
         var newest: Date
         var isNewsletter: Bool
+        /// From their newest email: how to leave their list.
+        var unsubscribe: Unsubscribe?
 
         var count: Int { uids.count }
     }
@@ -46,6 +48,8 @@ final class CleanupModel: ObservableObject, Identifiable {
     @Published var onlyRead = false
     @Published var filterText = ""
     @Published var selectedSenders: Set<String> = []
+    /// Also ask the ticked newsletters to stop sending (only those that allow it without a web page).
+    @Published var alsoUnsubscribe = true
     @Published var confirming = false
     @Published var error: String?
     @Published var lastResult: String?
@@ -99,13 +103,18 @@ final class CleanupModel: ObservableObject, Identifiable {
                 group.uids.append(item.uid)
                 group.size += item.size
                 if !item.seen { group.unread += 1 }
-                if item.date > group.newest { group.newest = item.date }
+                if item.date > group.newest {
+                    group.newest = item.date
+                    if item.unsubscribe != nil { group.unsubscribe = item.unsubscribe }
+                }
+                if group.unsubscribe == nil { group.unsubscribe = item.unsubscribe }
                 if item.isNewsletter { group.isNewsletter = true }
                 if group.address.name.isEmpty && !address.name.isEmpty { group.address = address }
                 bySender[key] = group
             } else {
                 bySender[key] = SenderGroup(id: key, address: address, uids: [item.uid], unread: item.seen ? 0 : 1,
-                                            size: item.size, newest: item.date, isNewsletter: item.isNewsletter)
+                                            size: item.size, newest: item.date, isNewsletter: item.isNewsletter,
+                                            unsubscribe: item.unsubscribe)
             }
         }
         var list = Array(bySender.values)
@@ -129,16 +138,47 @@ final class CleanupModel: ObservableObject, Identifiable {
         lastResult = nil
         defer { isWorking = false }
         let permanent = deletesPermanently
+        let leaving = alsoUnsubscribe ? targets.compactMap { $0.unsubscribe }.filter { $0.isAutomatic } : []
         do {
             try await store.cleanupRemove(folder: folder, uids: uids)
             let removed = Set(uids)
-            items.removeAll { removed.contains($0.uid) }
-            selectedSenders.subtract(targets.map { $0.id })
-            let noun = uids.count == 1 ? "1 email" : "\(uids.count) emails"
-            lastResult = permanent ? "Deleted \(noun)." : "Moved \(noun) to Trash."
+            withAnimation(.easeOut(duration: 0.25)) {
+                items.removeAll { removed.contains($0.uid) }
+                selectedSenders.subtract(targets.map { $0.id })
+            }
+            let noun = uids.count == 1 ? "1 email" : "\(uids.count.formatted()) emails"
+            var result = permanent ? "Deleted \(noun)" : "Moved \(noun) to Trash"
+            if !leaving.isEmpty {
+                var left = 0
+                for u in leaving where (try? await store.unsubscribe(u)) == .done { left += 1 }
+                if left > 0 { result += left == 1 ? " and unsubscribed from 1 newsletter" : " and unsubscribed from \(left) newsletters" }
+                if left < leaving.count { result += ". \(leaving.count - left) couldn't be unsubscribed" }
+            }
+            lastResult = result + "."
         } catch {
             self.error = error.localizedDescription
         }
+    }
+
+    /// Saves a sender's standing rule and applies it right away, then says what it did.
+    func setRule(_ rule: CleanupRule?, for group: SenderGroup) {
+        store.setRule(rule, for: group.id)
+        guard let rule = rule else { return }
+        isWorking = true
+        lastResult = nil
+        Task {
+            let removed = await store.applyRules()
+            await load()
+            isWorking = false
+            let noun = removed == 1 ? "1 email" : "\(removed.formatted()) emails"
+            lastResult = "Rule for \(group.address.display): \(rule.summary.lowercased())."
+                + (removed > 0 ? " Moved \(noun) to Trash." : "")
+        }
+    }
+
+    /// Ticked senders the app can unsubscribe from on its own.
+    func unsubscribable(_ selected: [SenderGroup]) -> Int {
+        selected.filter { $0.unsubscribe?.isAutomatic == true }.count
     }
 }
 
@@ -172,6 +212,8 @@ struct CleanupView: View {
         let selectedSize = selected.reduce(0) { $0 + $1.size }
         let noun = selectedCount == 1 ? "1 email" : "\(selectedCount.formatted()) emails"
         let most = groups.map { $0.count }.max() ?? 1
+        let leavable = model.unsubscribable(selected)
+        let unsubscribing = model.alsoUnsubscribe ? leavable : 0
 
         VStack(spacing: 0) {
             HStack(alignment: .top) {
@@ -183,6 +225,15 @@ struct CleanupView: View {
                          : "Tick the senders you want gone. Emails go to Trash, so you can still get them back.")
                         .font(.system(size: size(13)))
                         .foregroundColor(.secondary)
+                    if !model.isLoading && !groups.isEmpty {
+                        let shown = groups.reduce(0) { $0 + $1.count }
+                        let bytes = groups.reduce(0) { $0 + $1.size }
+                        Text("\(shown.formatted()) \(shown == 1 ? "email" : "emails") from \(groups.count.formatted()) \(groups.count == 1 ? "sender" : "senders") · \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))")
+                            .font(.system(size: size(12), weight: .medium))
+                            .foregroundColor(.secondary)
+                            .monospacedDigit()
+                            .padding(.top, 2)
+                    }
                 }
                 Spacer()
                 Picker("Mailbox:", selection: folderChoice) {
@@ -221,7 +272,11 @@ struct CleanupView: View {
                 List {
                     ForEach(groups) { group in
                         CleanupRow(group: group, isSelected: isSelected(group), share: Double(group.count) / Double(most),
-                                   showNewsletter: !model.onlyNewsletters, textSize: textSize)
+                                   showNewsletter: !model.onlyNewsletters,
+                                   rule: model.folder.role == .inbox ? store.rule(for: group.id) : nil,
+                                   setRule: model.folder.role == .inbox && !group.id.isEmpty
+                                       ? { model.setRule($0, for: group) } : nil,
+                                   textSize: textSize)
                     }
                 }
                 .listStyle(.inset)
@@ -270,6 +325,12 @@ struct CleanupView: View {
                 Spacer()
 
                 if model.isWorking { ProgressView().controlSize(.small) }
+                if leavable > 0 {
+                    Toggle(leavable == 1 ? "Also unsubscribe from 1 newsletter" : "Also unsubscribe from \(leavable) newsletters",
+                           isOn: $model.alsoUnsubscribe)
+                        .toggleStyle(.checkbox)
+                        .help("Ask these senders to stop. Newsletters that need their website to unsubscribe are left out: open one of their emails and use Unsubscribe there.")
+                }
                 if selectedCount > 0 {
                     Text(ByteCountFormatter.string(fromByteCount: Int64(selectedSize), countStyle: .file))
                         .font(.system(size: size(13)))
@@ -301,9 +362,12 @@ struct CleanupView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text(selected.count == 1
+            Text((selected.count == 1
                  ? "Everything shown from \(selected[0].address.display)."
                  : "Everything shown from \(selected.count) senders.")
+                 + (unsubscribing == 0 ? "" : unsubscribing == 1
+                    ? " You'll also be unsubscribed from 1 newsletter."
+                    : " You'll also be unsubscribed from \(unsubscribing) newsletters."))
         }
     }
 }
@@ -314,6 +378,9 @@ struct CleanupRow: View {
     @Binding var isSelected: Bool
     var share: Double = 1
     var showNewsletter = true
+    /// Inbox only: the standing rule for this sender, and how to change it.
+    var rule: CleanupRule? = nil
+    var setRule: ((CleanupRule?) -> Void)? = nil
     var textSize = 0
 
     private func size(_ base: CGFloat) -> CGFloat { MailType.size(base, textSize) }
@@ -348,10 +415,16 @@ struct CleanupRow: View {
                 }
                 .frame(height: 4)
                 .animation(.easeOut(duration: 0.18), value: isSelected)
-                Text(group.address.email.isEmpty ? "No address" : group.address.email)
-                    .font(.system(size: size(12)))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(group.address.email.isEmpty ? "No address" : group.address.email)
+                        .lineLimit(1)
+                    if let rule = rule {
+                        Label(rule.summary, systemImage: "wand.and.stars")
+                            .lineLimit(1)
+                    }
+                }
+                .font(.system(size: size(12)))
+                .foregroundColor(.secondary)
             }
             Spacer(minLength: 16)
             VStack(alignment: .trailing, spacing: 2) {
@@ -363,6 +436,30 @@ struct CleanupRow: View {
                     .foregroundColor(.secondary)
             }
             .frame(minWidth: 130, alignment: .trailing)
+            if let setRule = setRule {
+                Menu {
+                    let name = group.address.display
+                    Button("Always Keep Only the Newest") {
+                        setRule(CleanupRule(sender: group.id, name: name, keepNewest: true))
+                    }
+                    Button("Always Trash After a Week") {
+                        setRule(CleanupRule(sender: group.id, name: name, keepNewest: false, days: 7))
+                    }
+                    Button("Always Trash After a Month") {
+                        setRule(CleanupRule(sender: group.id, name: name, keepNewest: false, days: 30))
+                    }
+                    if rule != nil {
+                        Divider()
+                        Button("No Rule") { setRule(nil) }
+                    }
+                } label: {
+                    Image(systemName: rule == nil ? "ellipsis.circle" : "wand.and.stars")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(rule == nil ? "Clean up \(group.address.display) automatically from now on" : "Rule: \(rule?.summary ?? "")")
+                .accessibilityLabel("Rule for \(group.address.display)")
+            }
         }
         .padding(.vertical, 6)
         .contentShape(Rectangle())

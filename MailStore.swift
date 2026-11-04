@@ -116,6 +116,45 @@ final class MailStore: ObservableObject {
         set { selection = newValue.map { [$0] } ?? [] }
     }
 
+    /// The message shown in the reader: the selected one, or an earlier one of its conversation.
+    private var showingID: String?
+
+    /// One row per conversation in the list (View → Organize by Conversation).
+    @Published var groupsConversations = UserDefaults.standard.object(forKey: "conversations") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(groupsConversations, forKey: "conversations") }
+    }
+
+    /// The last move that can still be taken back, while its "Undo" notice shows.
+    @Published private(set) var undoable: UndoMove?
+    /// The main window's undo manager, so Edit → Undo (⌘Z) can take back moves.
+    weak var undoManager: UndoManager?
+
+    /// Senders whose HTML mail is shown as designed (on white) even when emails are darkened.
+    @Published private(set) var lightSenders = Set(UserDefaults.standard.stringArray(forKey: "lightSenders") ?? []) {
+        didSet { UserDefaults.standard.set(lightSenders.sorted(), forKey: "lightSenders") }
+    }
+
+    /// Snoozed mail, emails to send later and follow-up reminders (MailSmart.swift), kept on this Mac.
+    @Published var scheduled: [ScheduledItem] = ScheduledItem.load() {
+        didSet { ScheduledItem.save(scheduled) }
+    }
+    /// Senders whose remote images load without asking (lowercased addresses).
+    @Published var trustedImageSenders = Set(UserDefaults.standard.stringArray(forKey: "trustedImageSenders") ?? []) {
+        didSet { UserDefaults.standard.set(trustedImageSenders.sorted(), forKey: "trustedImageSenders") }
+    }
+    /// Standing Clean Up rules for the Inbox, one per sender.
+    @Published var cleanupRules: [CleanupRule] = CleanupRule.load() {
+        didSet { CleanupRule.save(cleanupRules) }
+    }
+    /// The Inbox's People / Newsletters / Receipts filter.
+    @Published var inboxFilter: InboxFilter = .all
+    /// Sheets: the attachment browser and the "Remind Me" date picker.
+    @Published var attachmentBrowser: AttachmentBrowserModel?
+    @Published var snoozePicker: SnoozeRequest?
+    /// Shows a notification (title, body): sent-later mail, follow-up reminders.
+    var onReminder: ((String, String) -> Void)?
+    var lastRulesRun = Date.distantPast
+
     /// Clean Up sheet, when open.
     @Published var cleanup: CleanupModel?
     @Published private(set) var opened: OpenedMessage?
@@ -142,10 +181,10 @@ final class MailStore: ObservableObject {
     var onFolderChanged: (() -> Void)?
 
     private let pageSize = 50
-    private var client: IMAPClient?
-    private var password = ""
+    var client: IMAPClient?
+    var password = ""
     private var lowestSeq = 1
-    private var folderToken = UUID()
+    var folderToken = UUID()
     private var pollTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
     private var inboxUIDNext: Int?
@@ -181,7 +220,10 @@ final class MailStore: ObservableObject {
     var visibleMessages: [MessageSummary] {
         if let results = searchResults { return results }
         let q = searchText.trimmingCharacters(in: .whitespaces).lowercased()
-        guard !q.isEmpty else { return messages }
+        guard !q.isEmpty else {
+            guard inboxFilter != .all, currentFolder?.role == .inbox else { return messages }
+            return messages.filter(inboxFilter.matches)
+        }
         return messages.filter { m in
             m.subject.lowercased().contains(q)
                 || m.snippet.lowercased().contains(q)
@@ -193,6 +235,27 @@ final class MailStore: ObservableObject {
 
     func message(id: String) -> MessageSummary? {
         searchResults?.first { $0.id == id } ?? messages.first { $0.id == id }
+    }
+
+    /// What the list shows: conversations (newest message first), or single messages when that's off.
+    var visibleThreads: [[MessageSummary]] {
+        let list = visibleMessages
+        return groupsConversations ? Threads.group(list) : list.map { [$0] }
+    }
+
+    /// The conversation a list row stands for (just the message itself when conversations are off).
+    func thread(of id: String) -> [MessageSummary] {
+        guard groupsConversations else { return message(id: id).map { [$0] } ?? [] }
+        return visibleThreads.first { $0.contains { $0.id == id } } ?? message(id: id).map { [$0] } ?? []
+    }
+
+    /// Every message the given rows stand for: acting on a conversation acts on all of it.
+    func expand(_ ids: Set<String>) -> [MessageSummary] {
+        guard groupsConversations else { return ids.compactMap { message(id: $0) } }
+        var seen = Set<String>()
+        return visibleThreads.filter { t in t.contains { ids.contains($0.id) } }
+            .flatMap { $0 }
+            .filter { seen.insert($0.id).inserted }
     }
 
     var openedIsDraft: Bool {
@@ -326,7 +389,7 @@ final class MailStore: ObservableObject {
         return nil
     }
 
-    private func reloadFolders() async {
+    func reloadFolders() async {
         guard let client = client else { return }
         do {
             folders = Self.sorted(try await client.listFolders())
@@ -355,7 +418,13 @@ final class MailStore: ObservableObject {
 
     // MARK: Folders and lists
 
+    /// List order: by date, so mail moved back (with a new, higher UID) lands where it belongs.
+    private static func newestFirst(_ a: MessageSummary, _ b: MessageSummary) -> Bool {
+        a.date != b.date ? a.date > b.date : a.uid > b.uid
+    }
+
     func open(folder: MailFolder) {
+        if folder.path != currentFolder?.path { inboxFilter = .all }
         currentFolder = folder
         messages = []
         selectedID = nil
@@ -391,7 +460,7 @@ final class MailStore: ObservableObject {
                 guard token == folderToken else { return }
                 let existing = Set(messages.map { $0.uid })
                 messages += page.messages.filter { !existing.contains($0.uid) }
-                messages.sort { $0.uid > $1.uid }
+                messages.sort(by: Self.newestFirst)
                 lowestSeq = page.lowestSeq
                 canLoadMore = lowestSeq > 1
             } catch {
@@ -400,7 +469,7 @@ final class MailStore: ObservableObject {
         }
     }
 
-    private func loadTop(token: UUID, showSpinner: Bool) async {
+    func loadTop(token: UUID, showSpinner: Bool) async {
         guard let client = client, let folder = currentFolder else { return }
         if showSpinner { isLoadingList = true }
         defer { if token == folderToken { isLoadingList = false } }
@@ -411,7 +480,7 @@ final class MailStore: ObservableObject {
             guard token == folderToken else { return }
             let cutoff = newest.map { $0.uid }.min() ?? 0
             let older = messages.filter { $0.uid < cutoff }
-            messages = (newest + older).sorted { $0.uid > $1.uid }
+            messages = (newest + older).sorted(by: Self.newestFirst)
             if older.isEmpty { lowestSeq = page.lowestSeq }
             canLoadMore = lowestSeq > 1
             if searchResults == nil, let sel = selectedID {
@@ -487,44 +556,55 @@ final class MailStore: ObservableObject {
     // MARK: Reading
 
     private func openSelected() {
-        allowRemoteContent = false
-        guard let id = selectedID, let summary = message(id: id) else {
+        if let id = selectedID { markSeen(thread(of: id)) }
+        show(selectedID)
+    }
+
+    /// Shows a message in the reader without changing the list selection
+    /// (e.g. an earlier message of the selected conversation).
+    func show(_ id: String?) {
+        showingID = id
+        allowRemoteContent = id.flatMap { message(id: $0) }.map { trustsImages(from: $0.from) } ?? false
+        guard let id = id, let summary = message(id: id) else {
             opened = nil
             isLoadingMessage = false
             return
         }
         if let parsed = cache[id] {
             opened = OpenedMessage(summary: summary, parsed: parsed)
-            markSeen(summary)
+            markSeen([summary])
             return
         }
         opened = nil
         isLoadingMessage = true
         guard let client = client else { return }
         Task {
-            defer { if selectedID == id { isLoadingMessage = false } }
+            defer { if showingID == id { isLoadingMessage = false } }
             do {
                 let bytes = try await client.fetchMessage(folder: summary.folder, uid: summary.uid)
                 let parsed = await Task.detached(priority: .userInitiated) { ParsedMessage.parse(bytes) }.value
                 if cache.count > 60 { cache.removeAll() }
                 cache[id] = parsed
-                guard selectedID == id else { return }
+                guard showingID == id else { return }
                 let latest = message(id: id) ?? summary
                 opened = OpenedMessage(summary: latest, parsed: parsed)
-                markSeen(latest)
+                markSeen([latest])
             } catch {
-                if selectedID == id { errorMessage = error.localizedDescription }
+                if showingID == id { errorMessage = error.localizedDescription }
             }
         }
     }
 
-    private func markSeen(_ message: MessageSummary) {
-        guard !message.seen, let client = client else { return }
-        update(message.id) { $0.seen = true }
-        let isInbox = message.folder == inboxFolder?.path
+    private func markSeen(_ list: [MessageSummary]) {
+        let unseen = list.filter { !$0.seen }
+        guard !unseen.isEmpty, let client = client else { return }
+        for m in unseen { update(m.id) { $0.seen = true } }
+        let groups = byFolder(unseen)
         Task {
-            try? await client.setFlag(folder: message.folder, uids: [message.uid], flag: "\\Seen", on: true)
-            if isInbox { await refreshUnread() }
+            for (folder, uids) in groups {
+                try? await client.setFlag(folder: folder, uids: uids, flag: "\\Seen", on: true)
+            }
+            await refreshUnread()
         }
     }
 
@@ -540,39 +620,29 @@ final class MailStore: ObservableObject {
         }
     }
 
-    private func removeLocally(_ id: String) {
-        let visible = visibleMessages
-        let index = visible.firstIndex(where: { $0.id == id })
-        messages.removeAll { $0.id == id }
-        if var results = searchResults {
-            results.removeAll { $0.id == id }
-            searchResults = results
-        }
-        cache[id] = nil
-        if selectedID == id {
-            let remaining = visibleMessages
-            if let i = index, !remaining.isEmpty {
-                selectedID = remaining[min(i, remaining.count - 1)].id
-            } else {
-                selectedID = nil
-            }
-        }
-    }
-
     // MARK: Actions
 
+    /// Marks a list row read or unread: the whole conversation when it stands for one.
     func toggleRead(_ id: String) {
-        guard let client = client, let m = message(id: id) else { return }
-        let newValue = !m.seen
-        update(id) { $0.seen = newValue }
-        let isInbox = m.folder == inboxFolder?.path
+        let targets = thread(of: id)
+        let newValue = !targets.allSatisfy { $0.seen }
+        setRead(targets, newValue)
+    }
+
+    private func setRead(_ list: [MessageSummary], _ read: Bool) {
+        let targets = list.filter { $0.seen != read }
+        guard !targets.isEmpty, let client = client else { return }
+        for m in targets { update(m.id) { $0.seen = read } }
+        let groups = byFolder(targets)
         Task {
             do {
-                try await client.setFlag(folder: m.folder, uids: [m.uid], flag: "\\Seen", on: newValue)
+                for (folder, uids) in groups {
+                    try await client.setFlag(folder: folder, uids: uids, flag: "\\Seen", on: read)
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }
-            if isInbox { await refreshUnread() }
+            await refreshUnread()
         }
     }
 
@@ -590,24 +660,7 @@ final class MailStore: ObservableObject {
     }
 
     func delete(_ id: String) {
-        guard let client = client, let m = message(id: id) else { return }
-        let trash = trashFolder
-        let token = folderToken
-        let isInbox = m.folder == inboxFolder?.path
-        removeLocally(id)
-        Task {
-            do {
-                if let trash = trash, trash.path != m.folder {
-                    try await client.move(folder: m.folder, uids: [m.uid], to: trash.path)
-                } else {
-                    try await client.deletePermanently(folder: m.folder, uids: [m.uid])
-                }
-                if isInbox { await refreshUnread() }
-            } catch {
-                errorMessage = error.localizedDescription
-                await loadTop(token: token, showSpinner: false)
-            }
-        }
+        relocate(expand([id]), to: nil)
     }
 
     func canArchive(_ id: String) -> Bool {
@@ -616,25 +669,118 @@ final class MailStore: ObservableObject {
     }
 
     func archive(_ id: String) {
-        guard let client = client, let archive = archiveFolder, let m = message(id: id),
-              archive.path != m.folder else { return }
+        guard let archive = archiveFolder else { return }
+        relocate(expand([id]), to: archive)
+    }
+
+    /// Moves messages to a folder, or to Trash when `destination` is nil (mail already in Trash,
+    /// or with no Trash folder, is deleted for good). Moves can be undone; permanent deletes can't.
+    func relocate(_ list: [MessageSummary], to destination: MailFolder?) {
+        guard let client = client else { return }
+        let dest = destination ?? trashFolder
+        let targets = destination == nil ? list : list.filter { $0.folder != destination?.path }
+        guard !targets.isEmpty else { return }
         let token = folderToken
-        let isInbox = m.folder == inboxFolder?.path
-        removeLocally(id)
+        let groups = byFolder(targets)
+        let moved = dest.map { d in targets.filter { $0.folder != d.path } } ?? []
+        removeMany(Set(targets.map { $0.id }))
         Task {
             do {
-                try await client.move(folder: m.folder, uids: [m.uid], to: archive.path)
-                if isInbox { await refreshUnread() }
+                for (folder, uids) in groups {
+                    if let d = dest, d.path != folder {
+                        try await client.move(folder: folder, uids: uids, to: d.path)
+                    } else {
+                        try await client.deletePermanently(folder: folder, uids: uids)
+                    }
+                }
+                if let d = dest, !moved.isEmpty { offerUndo(moved, to: d) }
             } catch {
-                errorMessage = error.localizedDescription
+                errorMessage = (destination.map { "Couldn't move to \($0.name): " } ?? "") + error.localizedDescription
                 await loadTop(token: token, showSpinner: false)
             }
+            await refreshUnread()
+        }
+    }
+
+    // MARK: Undo
+
+    struct UndoMove: Identifiable {
+        let id = UUID()
+        let messages: [MessageSummary]
+        let destination: MailFolder
+
+        var actionName: String {
+            switch destination.role {
+            case .trash: return "Move to Trash"
+            case .archive: return "Archive"
+            default: return "Move to \(destination.name)"
+            }
+        }
+
+        /// "Moved 3 messages to Trash"
+        var summary: String {
+            let noun = messages.count == 1 ? "1 message" : "\(messages.count.formatted()) messages"
+            return destination.role == .archive ? "Archived \(noun)" : "Moved \(noun) to \(destination.name)"
+        }
+    }
+
+    private func offerUndo(_ moved: [MessageSummary], to destination: MailFolder) {
+        let entry = UndoMove(messages: moved, destination: destination)
+        undoable = entry
+        undoManager?.registerUndo(withTarget: self) { $0.undo(entry) }
+        undoManager?.setActionName(entry.actionName)
+        Task {
+            try? await Task.sleep(nanoseconds: 8 * 1_000_000_000)
+            if undoable?.id == entry.id { undoable = nil }
+        }
+    }
+
+    /// The notice's Undo button: through the undo manager when this move is its latest, so ⌘Z stays in step.
+    func undoLatest() {
+        guard let entry = undoable else { return }
+        if let um = undoManager, um.canUndo, um.undoActionName == entry.actionName {
+            um.undo()
+        } else {
+            undo(entry)
+        }
+    }
+
+    /// Moves the messages back where they came from. They're found again by Message-ID,
+    /// since a move gives them new UIDs.
+    private func undo(_ entry: UndoMove) {
+        if undoable?.id == entry.id { undoable = nil }
+        guard let client = client else { return }
+        let token = folderToken
+        Task {
+            var missed = 0
+            for (folder, list) in Dictionary(grouping: entry.messages, by: { $0.folder }) {
+                var uids: [UInt32] = []
+                // ponytail: one SEARCH per message; batch with OR if undoing hundreds gets slow.
+                for m in list {
+                    guard let mid = m.messageID,
+                          let found = try? await client.findUIDs(folder: entry.destination.path, messageID: mid),
+                          !found.isEmpty else { missed += 1; continue }
+                    uids += found
+                }
+                do {
+                    try await client.move(folder: entry.destination.path, uids: uids, to: folder)
+                } catch {
+                    errorMessage = "Couldn't undo: " + error.localizedDescription
+                }
+            }
+            if missed > 0 {
+                errorMessage = missed == 1
+                    ? "One message couldn't be moved back. It's still in \(entry.destination.name)."
+                    : "\(missed) messages couldn't be moved back. They're still in \(entry.destination.name)."
+            }
+            await loadTop(token: token, showSpinner: false)
+            await refreshUnread()
         }
     }
 
     // MARK: Bulk actions on the selection
 
-    var selectedMessages: [MessageSummary] { selection.compactMap { message(id: $0) } }
+    var selectedMessages: [MessageSummary] { expand(selection) }
     var selectionAllRead: Bool { selectedMessages.allSatisfy { $0.seen } }
     var selectionAllFlagged: Bool { selectedMessages.allSatisfy { $0.flagged } }
     var selectionCanArchive: Bool {
@@ -642,111 +788,51 @@ final class MailStore: ObservableObject {
         return selectedMessages.contains { $0.folder != archive.path }
     }
 
-    private func byFolder(_ list: [MessageSummary]) -> [String: [UInt32]] {
+    func byFolder(_ list: [MessageSummary]) -> [String: [UInt32]] {
         var groups: [String: [UInt32]] = [:]
         for m in list { groups[m.folder, default: []].append(m.uid) }
         return groups
     }
 
+    /// Takes messages out of the list; if the selection went with them, selects the next row.
     private func removeMany(_ ids: Set<String>) {
-        let firstIndex = visibleMessages.firstIndex { ids.contains($0.id) }
+        let rowsBefore = visibleThreads.map { $0[0].id }
+        let firstIndex = rowsBefore.firstIndex { id in thread(of: id).contains { ids.contains($0.id) } }
+        let touchesSelection = !expand(selection).allSatisfy { !ids.contains($0.id) }
         messages.removeAll { ids.contains($0.id) }
         if var results = searchResults {
             results.removeAll { ids.contains($0.id) }
             searchResults = results
         }
         for id in ids { cache[id] = nil }
-        let remaining = visibleMessages
-        if let i = firstIndex, !remaining.isEmpty {
-            selection = [remaining[min(i, remaining.count - 1)].id]
+        guard touchesSelection else { return }
+        let rows = visibleThreads.map { $0[0].id }
+        if let i = firstIndex, !rows.isEmpty {
+            selection = [rows[min(i, rows.count - 1)]]
         } else {
             selection = []
         }
     }
 
     func deleteSelection() {
-        let targets = selectedMessages
-        guard !targets.isEmpty, let client = client else { return }
-        let trash = trashFolder
-        let token = folderToken
-        let groups = byFolder(targets)
-        removeMany(Set(targets.map { $0.id }))
-        Task {
-            do {
-                for (folder, uids) in groups {
-                    if let trash = trash, trash.path != folder {
-                        try await client.move(folder: folder, uids: uids, to: trash.path)
-                    } else {
-                        try await client.deletePermanently(folder: folder, uids: uids)
-                    }
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                await loadTop(token: token, showSpinner: false)
-            }
-            await refreshUnread()
-        }
+        relocate(selectedMessages, to: nil)
     }
 
     /// Moves messages to another folder (drag and drop onto the sidebar, or Move To in the menu).
     func move(_ ids: Set<String>, to destination: MailFolder) {
-        guard let client = client else { return }
-        let targets = ids.compactMap { message(id: $0) }.filter { $0.folder != destination.path }
-        guard !targets.isEmpty else { return }
-        let token = folderToken
-        let groups = byFolder(targets)
-        removeMany(Set(targets.map { $0.id }))
-        Task {
-            do {
-                for (folder, uids) in groups {
-                    try await client.move(folder: folder, uids: uids, to: destination.path)
-                }
-            } catch {
-                errorMessage = "Couldn't move to \(destination.name): " + error.localizedDescription
-                await loadTop(token: token, showSpinner: false)
-            }
-            await refreshUnread()
-        }
+        relocate(expand(ids), to: destination)
     }
 
     /// Folders a message can be moved into: everything except Drafts.
     var moveTargets: [MailFolder] { folders.filter { $0.role != .drafts } }
 
     func archiveSelection() {
-        guard let archive = archiveFolder, let client = client else { return }
-        let targets = selectedMessages.filter { $0.folder != archive.path }
-        guard !targets.isEmpty else { return }
-        let token = folderToken
-        let groups = byFolder(targets)
-        removeMany(Set(targets.map { $0.id }))
-        Task {
-            do {
-                for (folder, uids) in groups {
-                    try await client.move(folder: folder, uids: uids, to: archive.path)
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-                await loadTop(token: token, showSpinner: false)
-            }
-            await refreshUnread()
-        }
+        guard let archive = archiveFolder else { return }
+        relocate(selectedMessages, to: archive)
     }
 
     func setSelectionRead(_ read: Bool) {
-        let targets = selectedMessages.filter { $0.seen != read }
-        guard !targets.isEmpty, let client = client else { return }
-        for m in targets { update(m.id) { $0.seen = read } }
-        let groups = byFolder(targets)
-        Task {
-            do {
-                for (folder, uids) in groups {
-                    try await client.setFlag(folder: folder, uids: uids, flag: "\\Seen", on: read)
-                }
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-            await refreshUnread()
-        }
+        setRead(selectedMessages, read)
     }
 
     func setSelectionFlagged(_ flagged: Bool) {
@@ -809,6 +895,57 @@ final class MailStore: ObservableObject {
         await refreshUnread()
         let ids = Set(blocked.map { $0.id })
         return list.filter { !ids.contains($0.id) }
+    }
+
+    // MARK: Unsubscribe
+
+    enum UnsubscribeOutcome {
+        case done
+        /// The sender only offers a web page; it has been opened in the browser.
+        case openedPage
+    }
+
+    /// Leaves a mailing list the way its List-Unsubscribe header offers: a one-click request in the
+    /// background, else an unsubscribe email, else its web page in the browser.
+    func unsubscribe(_ u: Unsubscribe) async throws -> UnsubscribeOutcome {
+        if u.oneClick, let url = u.web {
+            var request = URLRequest(url: url, timeoutInterval: 20)
+            request.httpMethod = "POST"
+            request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+            request.httpBody = Data("List-Unsubscribe=One-Click".utf8)
+            if let (_, response) = try? await URLSession.shared.data(for: request),
+               let status = (response as? HTTPURLResponse)?.statusCode, (200..<300).contains(status) {
+                return .done
+            }
+        }
+        if let mailto = u.mailto, let account = account,
+           let parts = URLComponents(url: mailto, resolvingAgainstBaseURL: false), parts.path.contains("@") {
+            var draft = ComposeDraft()
+            draft.to = parts.path
+            draft.subject = parts.queryItems?.first { $0.name.lowercased() == "subject" }?.value ?? "unsubscribe"
+            draft.body = RichText.plain(parts.queryItems?.first { $0.name.lowercased() == "body" }?.value ?? "unsubscribe")
+            let message = buildMessage(draft, account: account,
+                                       messageID: MessageBuilder.newMessageID(for: account.email), forDraft: false)
+            try await SMTPSender.send(account: account, password: password, recipients: [parts.path], message: message)
+            return .done
+        }
+        if let url = u.web {
+            NSWorkspace.shared.open(url)
+            return .openedPage
+        }
+        throw MailError.server("This sender doesn't say how to unsubscribe.")
+    }
+
+    // MARK: Showing HTML mail as designed
+
+    func showsAsDesigned(_ sender: MailAddress?) -> Bool {
+        sender.map { lightSenders.contains($0.email.lowercased()) } ?? false
+    }
+
+    /// Remembers, per sender, whether their HTML mail is shown on white instead of darkened.
+    func setShowsAsDesigned(_ sender: MailAddress?, _ on: Bool) {
+        guard let key = sender?.email.lowercased(), !key.isEmpty else { return }
+        if on { lightSenders.insert(key) } else { lightSenders.remove(key) }
     }
 
     // MARK: Clean Up
@@ -944,7 +1081,7 @@ final class MailStore: ObservableObject {
         onCompose?(draft)
     }
 
-    private func buildMessage(_ draft: ComposeDraft, account: MailAccount, messageID: String, forDraft: Bool) -> [UInt8] {
+    func buildMessage(_ draft: ComposeDraft, account: MailAccount, messageID: String, forDraft: Bool) -> [UInt8] {
         let body = RichText.html(draft.body)
         return MessageBuilder.build(
             from: MailAddress(name: account.name, email: account.email),
@@ -972,6 +1109,7 @@ final class MailStore: ObservableObject {
         let message = buildMessage(draft, account: account, messageID: messageID, forDraft: false)
         try await SMTPSender.send(account: account, password: password,
                                   recipients: everyone.map { $0.email }, message: message)
+        remember(everyone)
 
         // Keep a copy in Sent, and mark the original as answered.
         if let client = client {
@@ -983,6 +1121,41 @@ final class MailStore: ObservableObject {
                 try? await client.setFlag(folder: ref.folder, uids: [ref.uid], flag: "\\Answered", on: true)
             }
         }
+    }
+
+    // MARK: Recipient suggestions
+
+    private static let recentKey = "recentRecipients"
+
+    /// People you've written to, most recent first ("Name <email>"), kept on this Mac.
+    private func remember(_ people: [MailAddress]) {
+        let fresh = people.map { $0.editable }
+        let keys = Set(people.map { $0.email.lowercased() })
+        let old = (UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? [])
+            .filter { !keys.contains(MailAddress.parseList($0).first?.email.lowercased() ?? "") }
+        UserDefaults.standard.set(Array((fresh + old).prefix(300)), forKey: Self.recentKey)
+    }
+
+    /// Up to five people matching what's been typed: those you've written to first, then senders
+    /// in the loaded mail. Matches the start of the address or of any word in the name.
+    func addressSuggestions(for typed: String) -> [MailAddress] {
+        let q = typed.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !q.isEmpty else { return [] }
+        let me = account?.email.lowercased()
+        let recent = (UserDefaults.standard.stringArray(forKey: Self.recentKey) ?? []).compactMap { MailAddress.parseList($0).first }
+        let seen = messages.filter { !$0.isAutomated }.compactMap { $0.from }
+        var keys = Set<String>()
+        var found: [MailAddress] = []
+        for a in recent + seen {
+            let key = a.email.lowercased()
+            guard key != me, !keys.contains(key) else { continue }
+            let words = a.name.lowercased().split(whereSeparator: { $0 == " " || $0 == "." || $0 == "-" })
+            guard key.hasPrefix(q) || words.contains(where: { $0.hasPrefix(q) }) || a.name.lowercased().hasPrefix(q) else { continue }
+            keys.insert(key)
+            found.append(a)
+            if found.count == 5 { break }
+        }
+        return found
     }
 
     // MARK: Drafts
@@ -1037,6 +1210,8 @@ final class MailStore: ObservableObject {
 
     private func poll(notify: Bool) async {
         guard let client = client, let inbox = inboxFolder else { return }
+        // Snoozed mail woken here comes back unread, so the check below announces it like new mail.
+        await runScheduled()
         do {
             let status = try await client.status(folder: inbox.path)
             setUnread(status.unseen)
@@ -1104,7 +1279,7 @@ final class MailStore: ObservableObject {
         autoReplied = replied
     }
 
-    private func refreshUnread() async {
+    func refreshUnread() async {
         guard let client = client, let inbox = inboxFolder else { return }
         if let status = try? await client.status(folder: inbox.path) { setUnread(status.unseen) }
     }

@@ -451,6 +451,75 @@ actor IMAPClient {
         }
     }
 
+    /// Whether anything in `folder` answers the message with this Message-ID (for follow-up reminders).
+    func hasReply(folder: String, to messageID: String) async throws -> Bool {
+        await lock()
+        defer { unlock() }
+        return try await withRetry { () async throws -> Bool in
+            _ = try await self.selectIfNeeded(folder)
+            let id = Self.quoted(messageID)
+            let r = try await self.run([.text("UID SEARCH OR HEADER In-Reply-To \(id) HEADER References \(id)")])
+            try r.check()
+            return !Self.searchUIDs(r.untagged).isEmpty
+        }
+    }
+
+    /// Every attachment in a folder, from the messages' structure; nothing is downloaded yet.
+    func fetchAttachments(folder: String) async throws -> [AttachmentInfo] {
+        await lock()
+        defer { unlock() }
+        return try await withRetry { () async throws -> [AttachmentInfo] in
+            let total = try await self.selectIfNeeded(folder)
+            guard total > 0 else { return [] }
+            var found: [AttachmentInfo] = []
+            var start = 1
+            while start <= total {
+                let end = min(start + 999, total)
+                let r = try await self.run([.text("FETCH \(start):\(end) (UID INTERNALDATE BODYSTRUCTURE BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)])")])
+                try r.check()
+                for vals in r.untagged {
+                    let items = Self.fetchItems(vals)
+                    guard let uidValue = items["UID"]?.int, let uid = UInt32(exactly: uidValue),
+                          let structure = items["BODYSTRUCTURE"]?.list else { continue }
+                    var headerBytes: [UInt8] = []
+                    for (key, value) in items where key.hasPrefix("BODY[HEADER") { headerBytes = value.bytes ?? [] }
+                    let h = MIMEHeaders.parse(headerBytes)
+                    let from = MailAddress.parseList(h["from"]).first
+                    let subject = MIME.decodeHeader(h["subject"] ?? "")
+                    let date = MailDate.parseInternal(items["INTERNALDATE"]?.text) ?? Date()
+                    for p in AttachmentInfo.parts(of: structure) {
+                        found.append(AttachmentInfo(folder: folder, uid: uid, part: p.part, filename: p.filename,
+                                                    mimeType: p.mimeType, encoding: p.encoding, size: p.size,
+                                                    from: from, subject: subject, date: date))
+                    }
+                }
+                start = end + 1
+            }
+            return found
+        }
+    }
+
+    /// One part of a message (e.g. "2" or "1.3"), decoded.
+    func fetchPart(folder: String, uid: UInt32, part: String, encoding: String) async throws -> Data {
+        await lock()
+        defer { unlock() }
+        return try await withRetry { () async throws -> Data in
+            _ = try await self.selectIfNeeded(folder)
+            let r = try await self.run([.text("UID FETCH \(uid) (UID BODY.PEEK[\(part)])")])
+            try r.check()
+            for vals in r.untagged {
+                let items = Self.fetchItems(vals)
+                guard items["UID"]?.int == Int(uid), let raw = items["BODY[\(part)]"]?.bytes else { continue }
+                switch encoding {
+                case "base64": return Data(MIME.decodeBase64(raw))
+                case "quoted-printable": return Data(MIME.decodeQuotedPrintable(raw))
+                default: return Data(raw)
+                }
+            }
+            throw MailError.server("That attachment is no longer on the server.")
+        }
+    }
+
     func createFolder(_ name: String) async throws {
         await lock()
         defer { unlock() }
@@ -537,7 +606,7 @@ actor IMAPClient {
             var start = 1
             while start <= total {
                 let end = min(start + 1999, total)
-                let r = try await self.run([.text("FETCH \(start):\(end) (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM DATE LIST-UNSUBSCRIBE LIST-ID PRECEDENCE)])")])
+                let r = try await self.run([.text("FETCH \(start):\(end) (UID FLAGS INTERNALDATE RFC822.SIZE BODY.PEEK[HEADER.FIELDS (FROM DATE LIST-UNSUBSCRIBE LIST-UNSUBSCRIBE-POST LIST-ID PRECEDENCE)])")])
                 try r.check()
                 for vals in r.untagged {
                     let fetched = Self.fetchItems(vals)
@@ -555,7 +624,8 @@ actor IMAPClient {
                         date: MailDate.parseInternal(fetched["INTERNALDATE"]?.text) ?? MailDate.parse(h["date"]) ?? Date(),
                         size: fetched["RFC822.SIZE"]?.int ?? 0,
                         seen: flags.contains("\\seen"),
-                        isNewsletter: newsletter))
+                        isNewsletter: newsletter,
+                        unsubscribe: Unsubscribe(header: h["list-unsubscribe"], post: h["list-unsubscribe-post"])))
                 }
                 start = end + 1
             }
@@ -874,7 +944,8 @@ actor IMAPClient {
         let h = MIMEHeaders.parse(headerBytes)
         let flags = Set((items["FLAGS"]?.list ?? []).compactMap { $0.text?.lowercased() })
         let contentType = MIME.parseParams(h["content-type"] ?? "text/plain").main
-        let refs = (h["references"] ?? "")
+        // In-Reply-To counts too: some mailers reply without a References header.
+        let refs = ((h["references"] ?? "") + " " + (h["in-reply-to"] ?? ""))
             .split(whereSeparator: { $0 == " " || $0 == "\t" })
             .map { String($0) }
             .filter { $0.hasPrefix("<") }
