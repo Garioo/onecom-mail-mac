@@ -3,14 +3,14 @@
   <channel>
     <title>one.com Mail</title>
     <item>
-      <title>Version 1.6</title>
-      <pubDate>Wed, 04 Nov 2026 11:35:03 +0000</pubDate>
-      <sparkle:version>1793792090</sparkle:version>
-      <sparkle:shortVersionString>1.6</sparkle:shortVersionString>
+      <title>Version 1.6.1</title>
+      <pubDate>Wed, 04 Nov 2026 11:53:05 +0000</pubDate>
+      <sparkle:version>1793793174</sparkle:version>
+      <sparkle:shortVersionString>1.6.1</sparkle:shortVersionString>
       <sparkle:minimumSystemVersion>12.0</sparkle:minimumSystemVersion>
-      <description><![CDATA[<p>Conversations, Undo (⌘Z), one-click Unsubscribe, Remind Me (snooze), Send Later, follow-up reminders, standing Clean Up rules, an attachment browser with Quick Look, an Inbox filter (People / Newsletters / Receipts), copyable sign-in codes, and Show as Designed for emails that look wrong in dark mode.</p>]]></description>
-      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.6/one.com-Mail-1.6.zip"
-                 type="application/octet-stream" sparkle:edSignature="SKk2E7/xSe7hdbRWjK91Ma5Cm80favk66KzGwGRVQD5G9XzCR2EgaiWIKcKWm8gllE1xwa0KNoEBQAlSVvNsBA==" length="3555641" />
+      <description><![CDATA[<p>Emails open faster again: the message is fetched first and shown before its web images finish loading.</p>]]></description>
+      <enclosure url="https://github.com/Garioo/onecom-mail-mac/releases/download/v1.6.1/one.com-Mail-1.6.1.zip"
+                 type="application/octet-stream" sparkle:edSignature="PWMqIHmvDAo2k/B0JkPreUfkcKHQxcd0Lm22r/9Ayv1yqQ20QUoBUfjnyhm+tuZNqv1+vP2YWEvfOvxJv4jsBg==" length="3558409" />
     </item>
   </channel>
 </rss>
